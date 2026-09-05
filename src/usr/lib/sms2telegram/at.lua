@@ -12,6 +12,14 @@ local function terminal_line(frame)
   return normalized, terminal
 end
 
+local function allowed_prefixes_for(command)
+  if command:match("^AT%+CMGL") then return { "+CMGL:" } end
+  if command:match("^AT%+CPMS") then return { "+CPMS:" } end
+  if command:match("^AT%+CMGF") then return { "+CMGF:" } end
+  if command:match("^AT%+CNMI") then return { "+CNMI:" } end
+  return {}
+end
+
 function Client.new(transport, core, options)
   options = options or {}
   return setmetatable({
@@ -23,13 +31,16 @@ function Client.new(transport, core, options)
 end
 
 function Client:command(text)
-  local ok, write_err = self.transport:write_all(text .. "\r")
+  local ok, write_err, remaining = self.transport:write_all(text .. "\r", self.timeout_ms)
   if not ok then return nil, write_err or "AT write failed" end
 
-  local frame, read_err = self.transport:read_result(self.timeout_ms)
+  local frame, read_err = self.transport:read_result(
+    remaining or self.timeout_ms, allowed_prefixes_for(text)
+  )
   if not frame then return nil, read_err or "AT command timed out" end
 
   local normalized, terminal = terminal_line(frame)
+  if not terminal then return nil, "AT command returned no terminal status" end
   if terminal == "OK" then return normalized end
   if terminal == "ERROR" or terminal:match("^%+CMS ERROR") then return nil, terminal end
   return nil, "AT command returned no terminal status"
@@ -112,15 +123,43 @@ local function has_event(nixio, revents, name)
   return revents and revents:contains(name)
 end
 
-function Transport:write_all(bytes)
+function Transport:write_all(bytes, timeout_ms)
+  timeout_ms = timeout_ms or 3000
+  local deadline = now_ms(self.nixio) + timeout_ms
   local offset = 1
   while offset <= #bytes do
+    local remaining = deadline - now_ms(self.nixio)
+    if remaining <= 0 then return nil, "write timeout" end
+    local ready, poll_err = self:poll_write(remaining)
+    if ready == nil then return nil, poll_err end
+    if not ready then return nil, "write timeout" end
     local written, err = self.fd:write(bytes:sub(offset))
-    if not written then return nil, err or "serial write failed" end
-    if written == 0 then return nil, "serial write made no progress" end
-    offset = offset + written
+    if not written then
+      if err and err:lower():match("would block") then
+        -- The descriptor remains nonblocking; wait for the next writable edge.
+      else
+        return nil, err or "serial write failed"
+      end
+    elseif written == 0 then
+      return nil, "serial write made no progress"
+    else
+      offset = offset + written
+    end
   end
-  return true
+  return true, nil, math.max(0, deadline - now_ms(self.nixio))
+end
+
+function Transport:poll_write(timeout_ms)
+  local events = self.nixio.poll_flags("out", "err", "hup")
+  local pfds = { { fd = self.fd, events = events } }
+  local ready, poll_err = self.nixio.poll(pfds, timeout_ms)
+  if ready == nil then return nil, poll_err or "serial poll failed" end
+  if ready == 0 then return false end
+  local revents = pfds[1].revents
+  if revents and (has_event(self.nixio, revents, "err") or has_event(self.nixio, revents, "hup")) then
+    return nil, has_event(self.nixio, revents, "hup") and "serial hangup" or "serial error"
+  end
+  return revents and has_event(self.nixio, revents, "out") or false
 end
 
 function Transport:poll_read(timeout_ms)
@@ -157,24 +196,45 @@ function Transport:next_line(timeout_ms)
   end
 end
 
-function Transport:read_result(timeout_ms)
+function Transport:read_result(timeout_ms, allowed_prefixes)
   local lines = {}
   local deadline = now_ms(self.nixio) + timeout_ms
+  local terminal_deadline
+  local function allowed_prefix(line)
+    for _, prefix in ipairs(allowed_prefixes or {}) do
+      if line:sub(1, #prefix) == prefix then return true end
+    end
+    return false
+  end
+  local function complete_frame()
+    return normalize_frame(table.concat(lines, "\r\n") .. "\r\n")
+  end
   while true do
     local line = pop_line(self)
     if line then
       if line:match('^%+CMTI:%s*"[^"]+",%s*%d+%s*$') then
         self.urcs[#self.urcs + 1] = line
       else
+        terminal_deadline = nil
+        if line:match("^%+[A-Z][A-Z0-9]*:") and not is_terminal(line) and
+            not allowed_prefix(line) then
+          return nil, "unexpected URC in AT response: " .. line
+        end
         lines[#lines + 1] = line
-        if is_terminal(line) then return normalize_frame(table.concat(lines, "\r\n") .. "\r\n") end
+        if is_terminal(line) then
+          terminal_deadline = math.min(deadline, now_ms(self.nixio) + 25)
+        end
       end
     else
-      local remaining = deadline - now_ms(self.nixio)
+      local remaining = (terminal_deadline or deadline) - now_ms(self.nixio)
+      if terminal_deadline and remaining <= 0 then return complete_frame() end
       if remaining <= 0 then return nil, "timeout" end
       local ready, err = self:poll_read(remaining)
       if ready == nil then return nil, err end
-      if not ready then return nil, "timeout" end
+      if not ready then
+        if terminal_deadline then return complete_frame() end
+        return nil, "timeout"
+      end
     end
   end
 end
@@ -208,6 +268,23 @@ function Transport:close()
   self.fd = nil
 end
 
+local function wait_for_child(nixio, child, timeout_ms)
+  local deadline = now_ms(nixio) + timeout_ms
+  while true do
+    local waited, state, status = nixio.waitpid(child, "nohang")
+    if waited == nil then return nil, state or "stty wait failed" end
+    if waited ~= false and waited ~= 0 then return waited, state, status end
+
+    local remaining = deadline - now_ms(nixio)
+    if remaining <= 0 then
+      nixio.kill(child, 9)
+      nixio.waitpid(child)
+      return nil, "stty setup timeout"
+    end
+    nixio.poll({}, math.min(50, remaining))
+  end
+end
+
 local function configure_terminal(nixio, device, stty_executable)
   local child, fork_err = nixio.fork()
   if child == nil then return nil, fork_err or "unable to start stty" end
@@ -215,7 +292,7 @@ local function configure_terminal(nixio, device, stty_executable)
     nixio.exec(unpack({ stty_executable, "-F", device, "115200", "raw", "-echo" }))
     os.exit(127)
   end
-  local waited, state, status = nixio.waitpid(child)
+  local waited, state, status = wait_for_child(nixio, child, 3000)
   if not waited then return nil, state or "stty failed" end
   if state ~= "exited" or status ~= 0 then
     return nil, "stty failed"
@@ -241,6 +318,11 @@ function M.open_nixio_transport(device, baud, stty_executable)
   if not configured then return nil, config_err end
   local fd, open_err = nixio.open(device, "r+")
   if not fd then return nil, open_err or "unable to open serial device" end
+  local nonblocking, nonblocking_err = fd:setblocking(false)
+  if not nonblocking then
+    fd:close()
+    return nil, nonblocking_err or "unable to make serial device nonblocking"
+  end
   local transport = setmetatable({ fd = fd, nixio = nixio, buffer = "", urcs = {} }, Transport)
   local drained, drain_err = transport:drain_stale()
   if not drained then

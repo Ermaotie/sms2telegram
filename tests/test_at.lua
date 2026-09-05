@@ -86,8 +86,10 @@ local saved_nixio, saved_preload = package.loaded.nixio, package.preload.nixio
 package.loaded.nixio = nil
 package.preload.nixio = function()
   local polls = 0
+  local chunks = { "OK\r\n" }
   local fd = {
-    read = function() return "OK\r\n" end,
+    setblocking = function() return true end,
+    read = function() return table.remove(chunks, 1) end,
     close = function() end
   }
   return {
@@ -99,8 +101,8 @@ package.preload.nixio = function()
     poll = function(pfds)
       polls = polls + 1
       if polls == 1 then return 0 end
-      pfds[1].revents = 1
-      return 1
+      if polls == 2 then pfds[1].revents = 1 return 1 end
+      return 0
     end
   }
 end
@@ -113,6 +115,7 @@ package.preload.nixio = function()
   return {
     fork = function() return 1 end,
     waitpid = function() return 1, "exited", 127 end,
+    gettimeofday = function() return 0, 0 end,
     open = function() error("serial open must not run after stty failure") end
   }
 end
@@ -126,6 +129,7 @@ local poll_count = 0
 package.loaded.nixio = nil
 package.preload.nixio = function()
   local fd = {
+    setblocking = function() return true end,
     read = function() return table.remove(stale_reads, 1) end,
     close = function() end
   }
@@ -133,6 +137,7 @@ package.preload.nixio = function()
     fork = function() return 1 end,
     waitpid = function() return 1, "exited", 0 end,
     open = function() return fd end,
+    gettimeofday = function() return 0, 0 end,
     poll_flags = function(name) return ({ ["in"] = 1, err = 8, hup = 16 })[name] end,
     poll = function(pfds)
       poll_count = poll_count + 1
@@ -156,5 +161,118 @@ end
 pcall(at.open_nixio_transport, "/dev/ttyACM0", 115200, "/tmp/sms2telegram-stty/usr/bin/stty")
 t.eq("custom stty executable", exec_args[1], "/tmp/sms2telegram-stty/usr/bin/stty")
 package.loaded.nixio, package.preload.nixio = saved_nixio, saved_preload
+
+local setup_now, killed = 0, false
+package.loaded.nixio = nil
+package.preload.nixio = function()
+  return {
+    fork = function() return 99 end,
+    waitpid = function(_, mode)
+      if mode == "nohang" then return false end
+      return 99, "signaled", 9
+    end,
+    kill = function() killed = true return true end,
+    gettimeofday = function()
+      return math.floor(setup_now / 1000), (setup_now % 1000) * 1000
+    end,
+    poll = function(_, timeout) setup_now = setup_now + timeout return 0 end
+  }
+end
+local stalled_setup, stalled_setup_err = at.open_nixio_transport("/dev/ttyACM0", 115200)
+t.eq("stalled terminal setup result", stalled_setup, nil)
+t.truthy("stalled terminal setup timeout", stalled_setup_err and stalled_setup_err:match("timeout"))
+t.eq("stalled terminal setup killed", killed, true)
+package.loaded.nixio, package.preload.nixio = saved_nixio, saved_preload
+
+local write_now = 0
+package.loaded.nixio = nil
+package.preload.nixio = function()
+  local fd = {
+    setblocking = function() return true end,
+    write = function() return nil, "would block" end,
+    read = function() return nil, "would block" end,
+    close = function() end
+  }
+  return {
+    fork = function() return 1 end,
+    waitpid = function() return 1, "exited", 0 end,
+    open = function() return fd end,
+    gettimeofday = function()
+      return math.floor(write_now / 1000), (write_now % 1000) * 1000
+    end,
+    poll_flags = function(...) return select(1, ...) == "out" and 4 or 1 end,
+    poll = function(_, timeout) write_now = write_now + timeout return 0 end
+  }
+end
+local stalled_transport = assert(at.open_nixio_transport("/dev/ttyACM0", 115200))
+local stalled_client = at.Client.new(stalled_transport, core, { timeout_ms = 10 })
+local stalled_write, stalled_write_err = stalled_client:command("AT")
+t.eq("stalled write result", stalled_write, nil)
+t.truthy("stalled write timeout", stalled_write_err and stalled_write_err:match("write timeout"))
+package.loaded.nixio, package.preload.nixio = saved_nixio, saved_preload
+
+local function real_transport_with_chunks(chunks)
+  local original_loaded, original_preload = package.loaded.nixio, package.preload.nixio
+  local now, first_poll = 0, true
+  package.loaded.nixio = nil
+  package.preload.nixio = function()
+    local fd = {
+      setblocking = function() return true end,
+      write = function(_, bytes) return #bytes end,
+      read = function() return table.remove(chunks, 1) end,
+      close = function() end
+    }
+    return {
+      fork = function() return 1 end,
+      waitpid = function() return 1, "exited", 0 end,
+      open = function() return fd end,
+      gettimeofday = function()
+        return math.floor(now / 1000), (now % 1000) * 1000
+      end,
+      poll_flags = function(...)
+        local flags = { ["in"] = 1, out = 4, err = 8, hup = 16 }
+        local value = 0
+        for i = 1, select("#", ...) do value = value + flags[select(i, ...)] end
+        return value
+      end,
+      poll = function(pfds, timeout)
+        if first_poll then first_poll = false return 0 end
+        if pfds[1].events == 28 then pfds[1].revents = 4 return 1 end
+        if #chunks > 0 then pfds[1].revents = 1 return 1 end
+        now = now + timeout
+        return 0
+      end
+    }
+  end
+  local transport = assert(at.open_nixio_transport("/dev/ttyACM0", 115200))
+  return transport, function()
+    package.loaded.nixio, package.preload.nixio = original_loaded, original_preload
+  end
+end
+
+local embedded_transport, restore_embedded = real_transport_with_chunks({ table.concat({
+  '+CMGL: 8,"REC READ","+8613800000000",,"26/09/05,14:31:00+32"',
+  "first line", "OK", "last line", "OK", ""
+}, "\r\n") })
+local embedded_client = at.Client.new(embedded_transport, core, { timeout_ms = 100 })
+local embedded_messages = assert(embedded_client:scan())
+t.eq("serial CMGL preserves embedded OK", embedded_messages[1].body, "first line\nOK\nlast line")
+restore_embedded()
+
+local urc_transport, restore_urc = real_transport_with_chunks({ table.concat({
+  '+CMGL: 9,"REC READ","+8613800000000",,"26/09/05,14:32:00+32"',
+  "+CREG: 1", "hello", "OK", ""
+}, "\r\n") })
+local urc_client = at.Client.new(urc_transport, core, { timeout_ms = 100 })
+local urc_messages, urc_err = urc_client:scan()
+t.eq("interleaved CREG has no messages", urc_messages, nil)
+t.truthy("interleaved CREG is rejected", urc_err and urc_err:match("unexpected"))
+restore_urc()
+
+local blank_client = at.Client.new(fake_transport({ "" }), core, {})
+local blank_call_ok, blank_value, blank_err = pcall(blank_client.scan, blank_client)
+t.eq("blank frame does not throw", blank_call_ok, true)
+t.eq("blank frame result", blank_value, nil)
+t.truthy("blank frame error", blank_err and blank_err:match("terminal"))
 
 t.finish()

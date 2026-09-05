@@ -303,7 +303,7 @@ transport:close()
 
 - [ ] **Step 5: Verify GREEN and run non-destructive modem smoke queries**
 
-Run `lua tests/test_at.lua src`; expected exit 0. Because the unmodified target lacks `stty`, download the target's `coreutils-stty` IPK into `/tmp`, extract it without installing it, and prepend its extracted `usr/bin` directory to `PATH` for the smoke driver only. Copy only `core.lua`, `at.lua`, and the smoke driver to `/tmp/sms2telegram-dev` and issue `AT`, `ATI`, `AT+CMGF=?`, `AT+CPMS=?`, and `AT+CNMI=?` through the real transport. Expected output includes `Air780EPV`, `+CMGF: (0-1)`, `SM`, and a `+CNMI` range; do not issue `CMGL`, `CMGR`, `CMGD`, or Telegram calls in this smoke check.
+Run `lua tests/test_at.lua src`; expected exit 0. Because the unmodified target lacks `stty`, download the target's `coreutils-stty` IPK into `/tmp` and extract it without installing it. Pass its extracted absolute executable path as the optional third argument to `at.open_nixio_transport` in the smoke driver only. Copy only `core.lua`, `at.lua`, and the smoke driver to `/tmp/sms2telegram-dev` and issue `AT`, `ATI`, `AT+CMGF=?`, `AT+CPMS=?`, and `AT+CNMI=?` through the real transport. Expected output includes `Air780EPV`, `+CMGF: (0-1)`, `SM`, and a `+CNMI` range; do not issue `CMGL`, `CMGR`, `CMGD`, or Telegram calls in this smoke check.
 
 - [ ] **Step 6: Commit the AT client**
 
