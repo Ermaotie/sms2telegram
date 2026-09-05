@@ -229,8 +229,9 @@ local Sender = {}
 Sender.__index = Sender
 
 local function temporary_path(pid, kind)
+  if kind ~= "message" and kind ~= "response" then return nil end
   local path = "/tmp/sms2telegram." .. pid .. "." .. kind
-  if not path:match("^/tmp/sms2telegram%.[0-9]+%.(message|response)$") then return nil end
+  if not path:match("^/tmp/sms2telegram%.[0-9]+%." .. kind .. "$") then return nil end
   return path
 end
 
