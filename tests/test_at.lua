@@ -348,6 +348,23 @@ local no_messages = assert(no_message_client:scan())
 t.eq("serial CMGL accepts no-message response", #no_messages, 0)
 restore_no_message()
 
+local leading_empty_transport, restore_leading_empty = real_transport_with_chunks({ "\r\nOK\r\n" })
+local leading_empty_client = at.Client.new(leading_empty_transport, core, { timeout_ms = 100 })
+local leading_empty_ok, leading_empty_messages = pcall(leading_empty_client.scan, leading_empty_client)
+t.eq("leading CRLF no-message scan does not throw", tostring(leading_empty_ok), "true")
+t.eq("leading CRLF no-message response", leading_empty_ok and #leading_empty_messages or -1, 0)
+restore_leading_empty()
+
+local leading_cmgl_transport, restore_leading_cmgl = real_transport_with_chunks({ table.concat({
+  "", '+CMGL: 12,"REC READ","+8613800000000",,"26/09/05,14:35:00+32"',
+  "004F004B", "OK", ""
+}, "\r\n") })
+local leading_cmgl_client = at.Client.new(leading_cmgl_transport, core, { timeout_ms = 100 })
+local leading_cmgl_ok, leading_cmgl_messages = pcall(leading_cmgl_client.scan, leading_cmgl_client)
+t.eq("leading CRLF CMGL scan does not throw", tostring(leading_cmgl_ok), "true")
+t.eq("leading CRLF CMGL body", leading_cmgl_ok and leading_cmgl_messages[1].body or "error", "OK")
+restore_leading_cmgl()
+
 local urc_transport, restore_urc = real_transport_with_chunks({ table.concat({
   '+CMGL: 9,"REC READ","+8613800000000",,"26/09/05,14:32:00+32"',
   "+CREG: 1", "hello", "OK", ""

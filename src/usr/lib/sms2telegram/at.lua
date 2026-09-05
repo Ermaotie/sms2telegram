@@ -216,8 +216,8 @@ function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode)
         if record and not record.has_body then return false end
         saw_header = true
         record = { has_body = false }
-      elseif not saw_header and line ~= "" then
-        return false
+      elseif not saw_header then
+        if line ~= "" then return false end
       else
         record.has_body = true
         if line ~= "" and (#line % 4 ~= 0 or line:find("[^0-9A-Fa-f]")) then
