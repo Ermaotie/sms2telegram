@@ -41,6 +41,15 @@ local function next_utf8(text, pos)
   local width = utf8_width(text, pos)
   if not width then return nil end
   if pos + width - 1 > #text then error("truncated UTF-8 sequence") end
+  local second = text:byte(pos + 1)
+  if width == 3 and ((text:byte(pos) == 0xE0 and second < 0xA0) or
+      (text:byte(pos) == 0xED and second > 0x9F)) then
+    error("invalid UTF-8 codepoint")
+  end
+  if width == 4 and ((text:byte(pos) == 0xF0 and second < 0x90) or
+      (text:byte(pos) == 0xF4 and second > 0x8F)) then
+    error("invalid UTF-8 codepoint")
+  end
   for i = pos + 1, pos + width - 1 do
     local byte = text:byte(i)
     if byte < 0x80 or byte > 0xBF then error("invalid UTF-8 continuation byte") end
