@@ -9,12 +9,50 @@ local function command_ok(status)
 end
 
 local function run(command)
-  local pipe, open_err = io.popen(command .. " 2>&1")
-  if not pipe then return nil, open_err or "unable to run command" end
-  local output = pipe:read("*a")
-  local closed = pipe:close()
-  return closed and 0 or 1, output
+  local loaded, nixio = pcall(require, "nixio")
+  if not loaded or not nixio or type(nixio.pipe) ~= "function" or
+      type(nixio.fork) ~= "function" or type(nixio.waitpid) ~= "function" or
+      type(nixio.exec) ~= "function" or type(nixio.dup) ~= "function" then
+    return nil, "nixio process APIs unavailable"
+  end
+
+  local read_pipe, write_pipe, pipe_err = nixio.pipe()
+  if not read_pipe then return nil, pipe_err or "unable to create command pipe" end
+  local pid, fork_err = nixio.fork()
+  if not pid then
+    read_pipe:close()
+    write_pipe:close()
+    return nil, fork_err or "unable to fork command"
+  end
+
+  if pid == 0 then
+    read_pipe:close()
+    nixio.stdout:close()
+    local duplicated = nixio.dup(write_pipe)
+    write_pipe:close()
+    if not duplicated or duplicated:fileno() ~= 1 then os.exit(127) end
+    nixio.exec("/bin/sh", "-c", command .. " 2>&1")
+    os.exit(127)
+  end
+
+  write_pipe:close()
+  local chunks = {}
+  while true do
+    local chunk = read_pipe:read(4096)
+    if not chunk or chunk == "" then break end
+    chunks[#chunks + 1] = chunk
+  end
+  read_pipe:close()
+
+  local waited, why, status = nixio.waitpid(pid)
+  if not waited then return nil, status or why or "unable to wait for command" end
+  local output = table.concat(chunks)
+  if why == "exited" then return tonumber(status) or 1, output end
+  if why == "signaled" then return 128 + (tonumber(status) or 0), output end
+  return nil, "unknown command wait status"
 end
+
+M._run = run
 
 local function chmod(path, permissions)
   local status = os.execute("chmod " .. permissions:sub(2) .. " " .. shell_quote(path))

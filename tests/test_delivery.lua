@@ -3,6 +3,7 @@ local t = dofile("tests/testlib.lua")
 local nixio = require "nixio"
 local core = dofile(root .. "/usr/lib/sms2telegram/core.lua")
 local delivery = dofile(root .. "/usr/lib/sms2telegram/delivery.lua")
+local run = assert(delivery._run, "default runner test hook required")
 
 local function quote(value)
   return "'" .. value:gsub("'", "'\"'\"'") .. "'"
@@ -41,6 +42,13 @@ assert(shell_status("mkdir -p " .. quote(test_dir)) == 0)
 local ledger_path = test_dir .. "/ledger"
 os.remove(ledger_path)
 os.remove(ledger_path .. ".tmp")
+
+local exit_status, exit_output = run("printf 200; exit 28")
+t.eq("default runner preserves exit 28", tostring(exit_status), "28")
+t.eq("default runner preserves failed output", exit_output, "200")
+local success_status, success_output = run("printf 200; exit 0")
+t.eq("default runner preserves exit 0", tostring(success_status), "0")
+t.eq("default runner preserves successful output", success_output, "200")
 
 -- These assertions fail if token/chat validation is relaxed or if route
 -- selection accepts a SIM interface instead of the exact permitted device.
@@ -144,7 +152,7 @@ local function sender_case(name, curl_exit, http_code, json_exit, json_value)
   }, { pid = pid })
   local ok, err = sender:send_parts("123456:Abc_def-XYZ", "-1001234567890", { "secret SMS body; $(not-a-command)" })
   local want = curl_exit == 0 and http_code == "200" and json_exit == 0 and json_value == "true\n" and true or nil
-  t.eq(name .. " result", ok, want)
+  t.eq(name .. " result", tostring(ok), tostring(want))
   if ok == nil then t.truthy(name .. " error", err) end
   t.eq(name .. " message cleanup", read_file(message_path), nil)
   t.eq(name .. " response cleanup", read_file(response_path), nil)
