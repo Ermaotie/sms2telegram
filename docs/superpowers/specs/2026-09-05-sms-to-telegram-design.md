@@ -24,7 +24,7 @@ The supplied AirM2M AT manual documents `AT+CPMS`, `AT+CMGF`, `AT+CSCS`, `AT+CNM
 
 ## Chosen Approach
 
-Use a lightweight Lua daemon managed by OpenWrt `procd`. Lua is already installed on the router, and `nixio` provides file-descriptor polling for the serial AT channel. The daemon invokes the installed curl client for Telegram HTTPS requests so the package does not need its own TLS implementation.
+Use a lightweight Lua daemon managed by OpenWrt `procd`. Lua is already installed on the router, and `nixio` provides file-descriptor polling for the serial AT channel. The daemon invokes the installed curl client for Telegram HTTPS requests so the package does not need its own TLS implementation. Live implementation probing found that the target does not currently provide `stty`, so the IPK declares `coreutils-stty` as a dependency and treats a failed terminal setup as a hard initialization error.
 
 The alternatives were rejected for the following reasons:
 

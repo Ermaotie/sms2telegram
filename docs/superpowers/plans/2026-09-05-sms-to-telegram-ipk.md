@@ -290,7 +290,7 @@ Initialization must execute the exact seven-command sequence from the test and s
 
 - [ ] **Step 4: Implement the real nixio transport**
 
-Validate the device as an absolute `/dev/tty...` path and baud as an integer. Run the fixed terminal setup `stty -F <validated-device> 115200 raw -echo`, open with `nixio.open(device, "r+")`, and use `nixio.poll` with `in`, `err`, and `hup` flags. Buffer arbitrary read chunks, normalize CRLF only when returning a completed frame, and preserve unsolicited `+CMTI` lines for `wait_for_cmti`.
+Validate the device as an absolute `/dev/tty...` path and baud as an integer. Run the fixed terminal setup `stty -F <validated-device> 115200 raw -echo`, require its exit status to be zero, open with `nixio.open(device, "r+")`, and use `nixio.poll` with `in`, `err`, and `hup` flags. Buffer arbitrary read chunks, normalize CRLF only when returning a completed frame, and preserve unsolicited `+CMTI` lines for `wait_for_cmti`.
 
 The real transport surface consumed by `Client` is:
 
@@ -303,7 +303,7 @@ transport:close()
 
 - [ ] **Step 5: Verify GREEN and run non-destructive modem smoke queries**
 
-Run `lua tests/test_at.lua src`; expected exit 0. Copy only `core.lua`, `at.lua`, and a smoke driver to `/tmp/sms2telegram-dev` and issue `AT`, `ATI`, `AT+CMGF=?`, `AT+CPMS=?`, and `AT+CNMI=?` through the real transport. Expected output includes `Air780EPV`, `+CMGF: (0-1)`, `SM`, and a `+CNMI` range; do not issue `CMGL`, `CMGR`, `CMGD`, or Telegram calls in this smoke check.
+Run `lua tests/test_at.lua src`; expected exit 0. Because the unmodified target lacks `stty`, download the target's `coreutils-stty` IPK into `/tmp`, extract it without installing it, and prepend its extracted `usr/bin` directory to `PATH` for the smoke driver only. Copy only `core.lua`, `at.lua`, and the smoke driver to `/tmp/sms2telegram-dev` and issue `AT`, `ATI`, `AT+CMGF=?`, `AT+CPMS=?`, and `AT+CNMI=?` through the real transport. Expected output includes `Air780EPV`, `+CMGF: (0-1)`, `SM`, and a `+CNMI` range; do not issue `CMGL`, `CMGR`, `CMGD`, or Telegram calls in this smoke check.
 
 - [ ] **Step 6: Commit the AT client**
 
@@ -595,7 +595,7 @@ git commit -m "feat: add OpenWrt service and operator guide"
 
 - members are exactly `debian-binary`, `control.tar.gz`, and `data.tar.gz`;
 - `debian-binary` is exactly `2.0` plus newline;
-- control fields equal package `sms2telegram`, version `1.0.0`, architecture `all`, and dependencies `lua, luci-lib-nixio, curl, ca-bundle, jsonfilter`;
+- control fields equal package `sms2telegram`, version `1.0.0`, architecture `all`, and dependencies `lua, luci-lib-nixio, coreutils-stty, curl, ca-bundle, jsonfilter`;
 - conffiles contains only `/etc/config/sms2telegram`;
 - data archive contains every file in the File Map and no test or secret files;
 - modes are `0755` for daemon/init/control scripts and `0600` for config;
@@ -616,7 +616,7 @@ Package: sms2telegram
 Version: 1.0.0
 Architecture: all
 Maintainer: Local Administrator
-Depends: lua, luci-lib-nixio, curl, ca-bundle, jsonfilter
+Depends: lua, luci-lib-nixio, coreutils-stty, curl, ca-bundle, jsonfilter
 Section: net
 Priority: optional
 Description: Forward stored Air780EPV SMS messages to Telegram using the router uplink.
