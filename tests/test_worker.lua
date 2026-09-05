@@ -144,6 +144,20 @@ t.eq("mixed messages order", table.concat(mixed_events, ","), "scan,delete,ledge
 t.eq("mixed failed new record not confirmed", mixed_records["8"], nil)
 t.eq("mixed confirmed record cleaned", mixed_records["7"], nil)
 
+-- Returning at the first failed new record would strand later confirmed records.
+local reverse_ok, reverse_err, reverse_events, reverse_records = cycle({
+  send_fails = true,
+  records = { ["8"] = digest_a },
+  messages = { message(7, "new"), message(8), message(9, "changed") }
+})
+t.eq("reverse mixed result", reverse_ok, nil)
+t.eq("reverse mixed category", reverse_err, "telegram")
+t.eq("reverse mixed cleans only later confirmation", table.concat(reverse_events, ","),
+  "scan,route,send,delete,ledger-remove,ledger-save")
+t.eq("reverse failed new record is not confirmed", reverse_records["7"], nil)
+t.eq("reverse later confirmation is removed", tostring(reverse_records["8"]), "nil")
+t.eq("reverse later new record is not sent", reverse_records["9"], nil)
+
 local function quote(value)
   return "'" .. value:gsub("'", "'\"'\"'") .. "'"
 end
@@ -161,22 +175,57 @@ local function write_file(path, contents)
   assert(file:close())
 end
 
--- If the daemon opened AT before checking UCI credentials, this fake records it.
-local temp = "/tmp/sms2telegram-worker-process-" .. tostring(os.time())
-assert(shell_status("mkdir -p " .. quote(temp .. "/lib") .. " " .. quote(temp .. "/bin")) == 0)
-assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/core.lua") .. " " .. quote(temp .. "/lib/core.lua")) == 0)
-assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/delivery.lua") .. " " .. quote(temp .. "/lib/delivery.lua")) == 0)
-assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/worker.lua") .. " " .. quote(temp .. "/lib/worker.lua")) == 0)
-write_file(temp .. "/bin/uci", [[#!/bin/sh
-case "$3" in
-  device) printf '/dev/fake\n' ;;
-  storage) printf 'SM\n' ;;
-  allowed_wan_device) printf 'eth0\n' ;;
-  poll_interval|retry_initial|retry_max) printf '1\n' ;;
+local process_number = 0
+local function process_temp()
+  process_number = process_number + 1
+  return "/tmp/sms2telegram-worker-process-" .. tostring(os.time()) .. "-" .. tostring(process_number)
+end
+
+local function copy_runtime(temp)
+  assert(shell_status("mkdir -p " .. quote(temp .. "/lib") .. " " .. quote(temp .. "/bin")) == 0)
+  assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/core.lua") .. " " .. quote(temp .. "/lib/core.lua")) == 0)
+  assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/delivery.lua") .. " " .. quote(temp .. "/lib/delivery.lua")) == 0)
+  assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/worker.lua") .. " " .. quote(temp .. "/lib/worker.lua")) == 0)
+end
+
+local function read_file(path)
+  local file = io.open(path, "rb")
+  if not file then return "" end
+  local value = file:read("*a")
+  file:close()
+  return value
+end
+
+local function install_uci(temp, missing)
+  write_file(temp .. "/bin/uci", [[#!/bin/sh
+key="$3"
+if [ -e "$SMS2TELEGRAM_UCI_STATE" ]; then changed=yes; else changed=; fi
+case "$key" in
+  sms2telegram.main.device) if [ "$changed" ]; then printf '/dev/second\n'; else printf '/dev/first\n'; fi ;;
+  sms2telegram.main.storage) if [ "$changed" ]; then printf 'ME\n'; else printf 'SM\n'; fi ;;
+  sms2telegram.main.bot_token) [ "$SMS2TELEGRAM_MISSING" = bot_token ] || printf '123456:Abc_def-XYZ\n' ;;
+  sms2telegram.main.chat_id) [ "$SMS2TELEGRAM_MISSING" = chat_id ] || printf '%s\n' '-1001234567890' ;;
+  sms2telegram.main.allowed_wan_device) printf 'eth0\n' ;;
+  sms2telegram.main.poll_interval|sms2telegram.main.retry_initial|sms2telegram.main.retry_max) printf '1\n' ;;
 esac
 ]])
-assert(shell_status("chmod 700 " .. quote(temp .. "/bin/uci")) == 0)
-write_file(temp .. "/lib/at.lua", [[local M = { Client = {} }
+  assert(shell_status("chmod 700 " .. quote(temp .. "/bin/uci")) == 0)
+end
+
+local function run_daemon(temp, extra, seconds)
+  local process_command = "PATH=" .. quote(temp .. "/bin") .. ":$PATH " ..
+    "SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") .. " " .. extra .. " " ..
+    quote(root .. "/usr/sbin/sms2telegram") ..
+    " >/dev/null 2>&1 & child=$!; sleep " .. tostring(seconds or 2) .. "; kill -0 $child; alive=$?; kill $child 2>/dev/null; wait $child 2>/dev/null; exit $alive"
+  return shell_status("sh -c " .. quote(process_command))
+end
+
+-- An early AT open would append to this fake; each blank credential is checked independently.
+for _, missing in ipairs({ "bot_token", "chat_id" }) do
+  local temp = process_temp()
+  copy_runtime(temp)
+  install_uci(temp)
+  write_file(temp .. "/lib/at.lua", [[local M = { Client = {} }
 function M.open_nixio_transport()
   local log = assert(io.open(os.getenv("SMS2TELEGRAM_AT_LOG"), "ab"))
   log:write("open\n")
@@ -185,15 +234,98 @@ function M.open_nixio_transport()
 end
 return M
 ]])
-local at_log = temp .. "/at.log"
-local process_command = "PATH=" .. quote(temp .. "/bin") .. ":$PATH " ..
-  "SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") .. " " ..
-  "SMS2TELEGRAM_AT_LOG=" .. quote(at_log) .. " " .. quote(root .. "/usr/sbin/sms2telegram") ..
-  " >/dev/null 2>&1 & child=$!; sleep 2; kill -0 $child; alive=$?; kill $child 2>/dev/null; wait $child 2>/dev/null; exit $alive"
-t.eq("empty-config daemon stays alive", shell_status("sh -c " .. quote(process_command)), 0)
-local log = io.open(at_log, "rb")
-t.eq("empty-config daemon makes zero AT opens", log and log:read("*a") or "", "")
-if log then log:close() end
-shell_status("rm -rf " .. quote(temp))
+  local at_log = temp .. "/at.log"
+  local extra = "SMS2TELEGRAM_MISSING=" .. missing .. " SMS2TELEGRAM_AT_LOG=" .. quote(at_log)
+  t.eq("empty " .. missing .. " daemon stays alive", run_daemon(temp, extra), 0)
+  t.eq("empty " .. missing .. " makes zero AT opens", read_file(at_log), "")
+  shell_status("rm -rf " .. quote(temp))
+end
+
+-- Replacing the daemon's PID wiring with an empty value makes Sender reject its temporary paths before curl.
+do
+  local temp = process_temp()
+  copy_runtime(temp)
+  install_uci(temp)
+  write_file(temp .. "/lib/at.lua", [[local M = { Client = {} }
+local stored = true
+local function append(value)
+  local file = assert(io.open(os.getenv("SMS2TELEGRAM_AT_LOG"), "ab"))
+  file:write(value .. "\n")
+  file:close()
+end
+function M.open_nixio_transport()
+  append("open")
+  return {}
+end
+function M.Client.new(transport)
+  return {
+    transport = transport,
+    initialize = function() append("init"); return true end,
+    scan = function()
+      if not stored then return {} end
+      return { { index = 7, sender = "+8613800000000", timestamp = "26/09/05,14:30:00+32", body = "test" } }
+    end,
+    delete = function() stored = false; append("delete"); return true end,
+    wait_for_cmti = function() require("nixio").nanosleep(1); return false end
+  }
+end
+return M
+]])
+  write_file(temp .. "/bin/ip", "#!/bin/sh\nprintf '1.1.1.1 dev eth0\\n'\n")
+  write_file(temp .. "/bin/curl", [[#!/bin/sh
+while [ "$1" ]; do
+  if [ "$1" = --output ]; then output="$2"; shift 2; else shift; fi
+done
+printf '{"ok":true}' > "$output"
+printf 'send\n' >> "$SMS2TELEGRAM_SEND_LOG"
+printf 200
+]])
+  write_file(temp .. "/bin/jsonfilter", "#!/bin/sh\nprintf 'true\\n'\n")
+  assert(shell_status("chmod 700 " .. quote(temp .. "/bin/ip") .. " " .. quote(temp .. "/bin/curl") .. " " .. quote(temp .. "/bin/jsonfilter")) == 0)
+  local at_log, send_log = temp .. "/at.log", temp .. "/send.log"
+  local extra = "SMS2TELEGRAM_AT_LOG=" .. quote(at_log) .. " SMS2TELEGRAM_SEND_LOG=" .. quote(send_log) ..
+    " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/delivered")
+  t.eq("production sender process stays alive", run_daemon(temp, extra), 0)
+  t.eq("production Sender reaches fake curl", read_file(send_log), "send\n")
+  t.eq("production Sender deletes after fake success", tostring(read_file(at_log):find("delete\n", 1, true) ~= nil), "true")
+  shell_status("rm -rf " .. quote(temp))
+end
+
+-- Keeping the old connected device/storage after UCI changes uses stale modem settings.
+do
+  local temp = process_temp()
+  copy_runtime(temp)
+  install_uci(temp)
+  write_file(temp .. "/lib/at.lua", [[local M = { Client = {} }
+local function append(value)
+  local file = assert(io.open(os.getenv("SMS2TELEGRAM_AT_LOG"), "ab"))
+  file:write(value .. "\n")
+  file:close()
+end
+function M.open_nixio_transport(device)
+  append("open:" .. device)
+  return { close = function() append("close") end }
+end
+function M.Client.new(transport, _, options)
+  return {
+    transport = transport,
+    initialize = function() append("init:" .. options.storage); return true end,
+    scan = function() return {} end,
+    wait_for_cmti = function() require("nixio").nanosleep(1); return false end
+  }
+end
+return M
+]])
+  local at_log, state = temp .. "/at.log", temp .. "/changed"
+  local extra = "SMS2TELEGRAM_AT_LOG=" .. quote(at_log) .. " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/delivered") ..
+    " SMS2TELEGRAM_UCI_STATE=" .. quote(state)
+  local process_command = "PATH=" .. quote(temp .. "/bin") .. ":$PATH SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") .. " " .. extra .. " " ..
+    quote(root .. "/usr/sbin/sms2telegram") ..
+    " >/dev/null 2>&1 & child=$!; sleep 1; : > " .. quote(state) .. "; sleep 2; kill -0 $child; alive=$?; kill $child 2>/dev/null; wait $child 2>/dev/null; exit $alive"
+  t.eq("hot-reload daemon stays alive", shell_status("sh -c " .. quote(process_command)), 0)
+  t.eq("hot-reload reopens changed device and storage", read_file(at_log),
+    "open:/dev/first\ninit:SM\nclose\nopen:/dev/second\ninit:ME\n")
+  shell_status("rm -rf " .. quote(temp))
+end
 
 t.finish()

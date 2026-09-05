@@ -6,6 +6,7 @@ local core = dofile(libdir .. "/core.lua")
 local at = dofile(libdir .. "/at.lua")
 local delivery = dofile(libdir .. "/delivery.lua")
 local worker_module = dofile(libdir .. "/worker.lua")
+local ledger_path = os.getenv("SMS2TELEGRAM_LEDGER_PATH") or "/var/lib/sms2telegram/delivered"
 
 pcall(nixio.openlog, "sms2telegram")
 
@@ -62,14 +63,24 @@ local function close_client(client)
 end
 
 local client
+local connected_device
+local connected_storage
 local delay
 while true do
   local config = load_config()
   if not config or not delivery.validate_credentials(config.bot_token, config.chat_id) then
     close_client(client)
     client = nil
+    connected_device = nil
+    connected_storage = nil
     nixio.nanosleep((config and config.poll_interval) or 1)
   else
+    if client and (connected_device ~= config.device or connected_storage ~= config.storage) then
+      close_client(client)
+      client = nil
+      connected_device = nil
+      connected_storage = nil
+    end
     if not client then
       local transport = at.open_nixio_transport(config.device, 115200)
       if transport then
@@ -78,6 +89,9 @@ while true do
         if not initialized then
           close_client(client)
           client = nil
+        else
+          connected_device = config.device
+          connected_storage = config.storage
         end
       end
       if not client then
@@ -88,7 +102,7 @@ while true do
     end
 
     if client then
-      local ledger = delivery.Ledger.new("/var/lib/sms2telegram/delivered")
+      local ledger = delivery.Ledger.new(ledger_path)
       if not ledger then
         delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
         log_redacted("ledger", delay)
@@ -98,7 +112,7 @@ while true do
           core = core,
           delivery = delivery,
           at_client = client,
-          sender = delivery.Sender.new(),
+          sender = delivery.Sender.new({}, { pid = nixio.getpid() }),
           ledger = ledger,
           route = route_output
         }, config)
@@ -109,6 +123,8 @@ while true do
           if waited == nil then
             close_client(client)
             client = nil
+            connected_device = nil
+            connected_storage = nil
             delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
             log_redacted("at", delay)
             nixio.nanosleep(delay)
@@ -117,6 +133,8 @@ while true do
           if category == "at" then
             close_client(client)
             client = nil
+            connected_device = nil
+            connected_storage = nil
           end
           delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
           log_redacted(category, delay)
