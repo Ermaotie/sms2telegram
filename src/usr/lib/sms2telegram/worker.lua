@@ -3,8 +3,8 @@ local M = {}
 local Worker = {}
 Worker.__index = Worker
 
-local function categorized(category)
-  return nil, category
+local function categorized(category, at_failed)
+  return nil, category, at_failed
 end
 
 local function valid_dependencies(deps)
@@ -25,9 +25,10 @@ function Worker:cycle()
   if not credentials_ok then return categorized("config") end
 
   local messages = deps.at_client:scan()
-  if not messages then return categorized("at") end
+  if not messages then return categorized("at", true) end
 
   local first_error
+  local at_failed = false
   for _, message in ipairs(messages) do
     local fingerprint = deps.delivery.fingerprint(message)
     if not fingerprint then
@@ -36,6 +37,8 @@ function Worker:cycle()
       local deleted = deps.at_client:delete(message.index)
       if not deleted then
         first_error = first_error or "at"
+        at_failed = true
+        break
       else
         local removed = deps.ledger:remove(message.index, fingerprint)
         if not removed then
@@ -70,6 +73,8 @@ function Worker:cycle()
                 local deleted = deps.at_client:delete(message.index)
                 if not deleted then
                   first_error = "at"
+                  at_failed = true
+                  break
                 else
                   local removed = deps.ledger:remove(message.index, fingerprint)
                   if not removed then
@@ -86,7 +91,7 @@ function Worker:cycle()
       end
     end
   end
-  if first_error then return categorized(first_error) end
+  if first_error then return categorized(first_error, at_failed) end
   return true
 end
 

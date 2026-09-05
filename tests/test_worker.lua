@@ -35,7 +35,7 @@ local function fixture(options)
       end,
       delete = function(_, index)
         events[#events + 1] = "delete"
-        if options.delete_fails then return nil, "delete failed" end
+        if options.delete_fails or options.delete_fails_at == index then return nil, "delete failed" end
         return true
       end
     },
@@ -77,8 +77,8 @@ local function cycle(options, config)
   local instance = worker.new(deps, config or {
     bot_token = "token", chat_id = "chat", allowed_wan_device = "eth0", telegram_limit = 4096
   })
-  local ok, err = instance:cycle()
-  return ok, err, events, records
+  local ok, err, at_failed = instance:cycle()
+  return ok, err, events, records, at_failed
 end
 
 -- Removing the early credential gate would expose the modem or confirmation state.
@@ -157,6 +157,20 @@ t.eq("reverse mixed cleans only later confirmation", table.concat(reverse_events
 t.eq("reverse failed new record is not confirmed", reverse_records["7"], nil)
 t.eq("reverse later confirmation is removed", tostring(reverse_records["8"]), "nil")
 t.eq("reverse later new record is not sent", reverse_records["9"], nil)
+
+-- Once a delete loses AT synchronization, no later delete may touch that serial session.
+local at_stop_ok, at_stop_err, at_stop_events, at_stop_records, at_stop_failed = cycle({
+  send_fails = true,
+  delete_fails_at = 8,
+  records = { ["8"] = digest_a, ["9"] = digest_a },
+  messages = { message(7, "new"), message(8), message(9) }
+})
+t.eq("AT stop preserves primary Telegram error", at_stop_ok, nil)
+t.eq("AT stop primary category", at_stop_err, "telegram")
+t.eq("AT stop reports reconnect signal", tostring(at_stop_failed), "true")
+t.eq("AT stop has no later serial delete", table.concat(at_stop_events, ","), "scan,route,send,delete")
+t.eq("AT stop keeps failed confirmation", at_stop_records["8"], digest_a)
+t.eq("AT stop keeps later confirmation", tostring(at_stop_records["9"]), digest_a)
 
 local function quote(value)
   return "'" .. value:gsub("'", "'\"'\"'") .. "'"
@@ -325,6 +339,44 @@ return M
   t.eq("hot-reload daemon stays alive", shell_status("sh -c " .. quote(process_command)), 0)
   t.eq("hot-reload reopens changed device and storage", read_file(at_log),
     "open:/dev/first\ninit:SM\nclose\nopen:/dev/second\ninit:ME\n")
+  shell_status("rm -rf " .. quote(temp))
+end
+
+-- A Telegram primary error must still recreate the client when the worker reports AT failure.
+do
+  local temp = process_temp()
+  copy_runtime(temp)
+  install_uci(temp)
+  write_file(temp .. "/lib/worker.lua", [[local M = {}
+local failed = false
+function M.new()
+  return { cycle = function()
+    if not failed then failed = true; return nil, "telegram", true end
+    return nil, "telegram", false
+  end }
+end
+return M
+]])
+  write_file(temp .. "/lib/at.lua", [[local M = { Client = {} }
+local function append(value)
+  local file = assert(io.open(os.getenv("SMS2TELEGRAM_AT_LOG"), "ab"))
+  file:write(value .. "\n")
+  file:close()
+end
+function M.open_nixio_transport()
+  append("open")
+  return { close = function() append("close") end }
+end
+function M.Client.new(transport)
+  return { transport = transport, initialize = function() append("init"); return true end }
+end
+return M
+]])
+  local at_log = temp .. "/at.log"
+  local extra = "SMS2TELEGRAM_AT_LOG=" .. quote(at_log) .. " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/delivered")
+  t.eq("AT reconnect daemon stays alive", run_daemon(temp, extra, 3), 0)
+  t.eq("AT reconnect closes and rebuilds after Telegram primary error", read_file(at_log),
+    "open\ninit\nclose\nopen\ninit\n")
   shell_status("rm -rf " .. quote(temp))
 end
 

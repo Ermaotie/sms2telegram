@@ -116,7 +116,7 @@ while true do
           ledger = ledger,
           route = route_output
         }, config)
-        local ok, category = instance:cycle()
+        local ok, category, at_failed = instance:cycle()
         if ok then
           delay = nil
           local waited, wait_err = client:wait_for_cmti(config.poll_interval * 1000)
@@ -130,7 +130,7 @@ while true do
             nixio.nanosleep(delay)
           end
         else
-          if category == "at" then
+          if category == "at" or at_failed then
             close_client(client)
             client = nil
             connected_device = nil
