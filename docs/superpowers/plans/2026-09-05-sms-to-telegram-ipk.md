@@ -178,7 +178,7 @@ Append fixtures that exercise a real text-mode AirM2M response, multiline preser
 
 ```lua
 local response = table.concat({
-  '+CMGL: 7,"REC READ","002B003800360031003300380030003000300030003000300030",,"26/09/05,14:30:00+32"',
+  '+CMGL: 7,"REC READ","002B00380036003100330038003000300030003000300030003000300030",,"26/09/05,14:30:00+32"',
   '77ED4FE1000A7B2C4E8C884C',
   'OK',
   ''
@@ -595,7 +595,7 @@ git commit -m "feat: add OpenWrt service and operator guide"
 
 - members are exactly `debian-binary`, `control.tar.gz`, and `data.tar.gz`;
 - `debian-binary` is exactly `2.0` plus newline;
-- control fields equal package `sms2telegram`, version `1.0.0`, architecture `all`, and dependencies `lua, libubox-lua, curl, ca-bundle, jsonfilter`;
+- control fields equal package `sms2telegram`, version `1.0.0`, architecture `all`, and dependencies `lua, luci-lib-nixio, curl, ca-bundle, jsonfilter`;
 - conffiles contains only `/etc/config/sms2telegram`;
 - data archive contains every file in the File Map and no test or secret files;
 - modes are `0755` for daemon/init/control scripts and `0600` for config;
@@ -616,7 +616,7 @@ Package: sms2telegram
 Version: 1.0.0
 Architecture: all
 Maintainer: Local Administrator
-Depends: lua, libubox-lua, curl, ca-bundle, jsonfilter
+Depends: lua, luci-lib-nixio, curl, ca-bundle, jsonfilter
 Section: net
 Priority: optional
 Description: Forward stored Air780EPV SMS messages to Telegram using the router uplink.
