@@ -1,5 +1,6 @@
 local root = assert(arg[1], "source root required")
 local t = dofile("tests/testlib.lua")
+local nixio = require "nixio"
 local core = dofile(root .. "/usr/lib/sms2telegram/core.lua")
 local delivery = dofile(root .. "/usr/lib/sms2telegram/delivery.lua")
 
@@ -23,10 +24,8 @@ local function read_file(path)
 end
 
 local function mode(path)
-  local pipe = assert(io.popen("stat -c %a " .. quote(path) .. " 2>/dev/null || stat -f %Lp " .. quote(path)))
-  local value = pipe:read("*l")
-  pipe:close()
-  return value
+  local metadata = nixio.fs.stat(path)
+  return metadata and tostring(metadata.modedec)
 end
 
 local function process_id()
@@ -74,19 +73,17 @@ t.eq("fingerprint canonical", canonical,
 t.eq("fingerprint temporary mode", hashed_mode, "600")
 t.eq("fingerprint temporary cleanup", read_file(hashed_path), nil)
 
-local chmod_calls = {}
 local fs = {
   open = io.open,
   rename = os.rename,
   remove = os.remove,
   chmod = function(path, permissions)
-    chmod_calls[path] = permissions
     return shell_status("chmod " .. tostring(permissions) .. " " .. quote(path)) == 0
   end
 }
 
--- This uses real files; recording chmod calls lets the test check the
--- short-lived atomic file before it is renamed away.
+-- These are real filesystem metadata checks, including the temporary ledger
+-- before its atomic rename.
 local corrupt = assert(io.open(ledger_path, "wb"))
 corrupt:write("7\tshort-digest\n")
 corrupt:close()
@@ -96,9 +93,16 @@ t.truthy("corrupt ledger error", corrupt_err)
 os.remove(ledger_path)
 local ledger = assert(delivery.Ledger.new(ledger_path, fs))
 assert(ledger:add(7, string.rep("a", 64)))
+local saved_temporary_mode
+local original_rename = fs.rename
+fs.rename = function(source, destination)
+  saved_temporary_mode = mode(source)
+  return original_rename(source, destination)
+end
 assert(ledger:save_atomic())
+fs.rename = original_rename
 t.eq("ledger mode", mode(ledger_path), "600")
-t.eq("ledger temporary mode", chmod_calls[ledger_path .. ".tmp"], "0600")
+t.eq("ledger temporary mode", saved_temporary_mode, "600")
 local reloaded = assert(delivery.Ledger.new(ledger_path, fs))
 t.eq("ledger reload matching fingerprint", reloaded:contains(7, string.rep("a", 64)), true)
 t.eq("ledger does not match changed fingerprint", reloaded:contains(7, string.rep("d", 64)), false)
@@ -119,7 +123,6 @@ local function sender_case(name, curl_exit, http_code, json_exit, json_value)
     rename = os.rename,
     remove = os.remove,
     chmod = function(path, permissions)
-      request_modes[path] = permissions
       return shell_status("chmod " .. tostring(permissions) .. " " .. quote(path)) == 0
     end
   }
@@ -128,6 +131,8 @@ local function sender_case(name, curl_exit, http_code, json_exit, json_value)
     exec = function(command)
       commands[#commands + 1] = command
       if command:match("^curl ") then
+        request_modes[message_path] = mode(message_path)
+        request_modes[response_path] = mode(response_path)
         local response = assert(io.open(response_path, "wb"))
         response:write('{"ok":true}')
         response:close()
@@ -138,12 +143,13 @@ local function sender_case(name, curl_exit, http_code, json_exit, json_value)
     end
   }, { pid = pid })
   local ok, err = sender:send_parts("123456:Abc_def-XYZ", "-1001234567890", { "secret SMS body; $(not-a-command)" })
-  t.eq(name .. " result", ok, curl_exit == 0 and http_code == "200" and json_exit == 0 and json_value == "true\n" and true or nil)
+  local want = curl_exit == 0 and http_code == "200" and json_exit == 0 and json_value == "true\n" and true or nil
+  t.eq(name .. " result", ok, want)
   if ok == nil then t.truthy(name .. " error", err) end
   t.eq(name .. " message cleanup", read_file(message_path), nil)
   t.eq(name .. " response cleanup", read_file(response_path), nil)
-  t.eq(name .. " message mode", request_modes[message_path], "0600")
-  t.eq(name .. " response mode", request_modes[response_path], "0600")
+  t.eq(name .. " message mode", request_modes[message_path], "600")
+  t.eq(name .. " response mode", request_modes[response_path], "600")
   return commands
 end
 
