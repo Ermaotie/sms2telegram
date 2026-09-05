@@ -313,6 +313,18 @@ t.eq("delayed raw CMGL has no messages", tostring(raw_cmgl_messages == nil), "tr
 t.eq("delayed raw CMGL is ambiguous", tostring(not not (raw_cmgl_err and raw_cmgl_err:match("ambiguous"))), "true")
 restore_raw_cmgl()
 
+local header_only_transport, restore_header_only = real_transport_with_chunks({
+  { at = 0, data = table.concat({
+    '+CMGL: 10,"REC READ","+8613800000000",,"26/09/05,14:33:00+32"', "OK", ""
+  }, "\r\n") },
+  { at = 30, data = table.concat({ "raw body", "OK", "" }, "\r\n") }
+})
+local header_only_client = at.Client.new(header_only_transport, core, { timeout_ms = 100 })
+local header_only_messages, header_only_err = header_only_client:scan()
+t.eq("header-only CMGL has no messages", tostring(header_only_messages == nil), "true")
+t.eq("header-only CMGL is ambiguous", tostring(not not (header_only_err and header_only_err:match("ambiguous"))), "true")
+restore_header_only()
+
 local encoded_transport, restore_encoded = real_transport_with_chunks({ table.concat({
   '+CMGL: 8,"REC READ","+8613800000000",,"26/09/05,14:31:00+32"',
   "004F004B", "OK", ""
@@ -321,6 +333,20 @@ local encoded_client = at.Client.new(encoded_transport, core, { timeout_ms = 100
 local encoded_messages = assert(encoded_client:scan())
 t.eq("serial CMGL accepts UCS2 body", encoded_messages[1].body, "OK")
 restore_encoded()
+
+local empty_transport, restore_empty = real_transport_with_chunks({ table.concat({
+  '+CMGL: 11,"REC READ","+8613800000000",,"26/09/05,14:34:00+32"', "", "OK", ""
+}, "\r\n") })
+local empty_client = at.Client.new(empty_transport, core, { timeout_ms = 100 })
+local empty_messages = assert(empty_client:scan())
+t.eq("serial CMGL accepts explicit empty body", empty_messages[1].body, "")
+restore_empty()
+
+local no_message_transport, restore_no_message = real_transport_with_chunks({ "OK\r\n" })
+local no_message_client = at.Client.new(no_message_transport, core, { timeout_ms = 100 })
+local no_messages = assert(no_message_client:scan())
+t.eq("serial CMGL accepts no-message response", #no_messages, 0)
+restore_no_message()
 
 local urc_transport, restore_urc = real_transport_with_chunks({ table.concat({
   '+CMGL: 9,"REC READ","+8613800000000",,"26/09/05,14:32:00+32"',

@@ -210,18 +210,22 @@ function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode)
     return normalize_frame(table.concat(lines, "\r\n") .. "\r\n")
   end
   local function complete_cmgl()
-    local saw_header = false
+    local record, saw_header
     for _, line in ipairs(lines) do
       if line:match("^%+CMGL:%s*%d+") then
+        if record and not record.has_body then return false end
         saw_header = true
-      elseif saw_header and line ~= "" and
-          (#line % 4 ~= 0 or line:find("[^0-9A-Fa-f]")) then
-        return false
+        record = { has_body = false }
       elseif not saw_header and line ~= "" then
         return false
+      else
+        record.has_body = true
+        if line ~= "" and (#line % 4 ~= 0 or line:find("[^0-9A-Fa-f]")) then
+          return false
+        end
       end
     end
-    return true
+    return not record or record.has_body
   end
   while true do
     local line = pop_line(self)
