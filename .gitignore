@@ -1,0 +1,5 @@
+router.txt
+*.pdf
+build/
+dist/*.ipk
+dist/*.sha256
