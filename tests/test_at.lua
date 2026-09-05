@@ -168,7 +168,10 @@ package.preload.nixio = function()
   return {
     fork = function() return 99 end,
     waitpid = function(_, mode)
-      if mode == "nohang" then return false end
+      if mode == "nohang" then
+        if killed then return 99, "signaled", 9 end
+        return false
+      end
       return 99, "signaled", 9
     end,
     kill = function() killed = true return true end,
@@ -182,6 +185,43 @@ local stalled_setup, stalled_setup_err = at.open_nixio_transport("/dev/ttyACM0",
 t.eq("stalled terminal setup result", stalled_setup, nil)
 t.truthy("stalled terminal setup timeout", stalled_setup_err and stalled_setup_err:match("timeout"))
 t.eq("stalled terminal setup killed", killed, true)
+package.loaded.nixio, package.preload.nixio = saved_nixio, saved_preload
+
+local kill_failure_now = 0
+package.loaded.nixio = nil
+package.preload.nixio = function()
+  return {
+    fork = function() return 100 end,
+    waitpid = function() return false end,
+    kill = function() return nil, "permission denied" end,
+    gettimeofday = function()
+      return math.floor(kill_failure_now / 1000), (kill_failure_now % 1000) * 1000
+    end,
+    poll = function(_, timeout) kill_failure_now = kill_failure_now + timeout return 0 end
+  }
+end
+local kill_failure, kill_failure_err = at.open_nixio_transport("/dev/ttyACM0", 115200)
+t.eq("stty cleanup kill failure result", kill_failure, nil)
+t.eq("stty cleanup kill failure", tostring(not not (kill_failure_err and kill_failure_err:match("cleanup kill"))), "true")
+package.loaded.nixio, package.preload.nixio = saved_nixio, saved_preload
+
+local unreaped_now, unreaped_killed = 0, false
+package.loaded.nixio = nil
+package.preload.nixio = function()
+  return {
+    fork = function() return 101 end,
+    waitpid = function() return false end,
+    kill = function() unreaped_killed = true return true end,
+    gettimeofday = function()
+      return math.floor(unreaped_now / 1000), (unreaped_now % 1000) * 1000
+    end,
+    poll = function(_, timeout) unreaped_now = unreaped_now + timeout return 0 end
+  }
+end
+local unreaped, unreaped_err = at.open_nixio_transport("/dev/ttyACM0", 115200)
+t.eq("unreaped stty result", unreaped, nil)
+t.eq("unreaped stty cleanup timeout", tostring(not not (unreaped_err and unreaped_err:match("cleanup timeout"))), "true")
+t.eq("unreaped stty killed", unreaped_killed, true)
 package.loaded.nixio, package.preload.nixio = saved_nixio, saved_preload
 
 local write_now = 0
@@ -219,7 +259,10 @@ local function real_transport_with_chunks(chunks)
     local fd = {
       setblocking = function() return true end,
       write = function(_, bytes) return #bytes end,
-      read = function() return table.remove(chunks, 1) end,
+      read = function()
+        local chunk = table.remove(chunks, 1)
+        return type(chunk) == "table" and chunk.data or chunk
+      end,
       close = function() end
     }
     return {
@@ -238,8 +281,15 @@ local function real_transport_with_chunks(chunks)
       poll = function(pfds, timeout)
         if first_poll then first_poll = false return 0 end
         if pfds[1].events == 28 then pfds[1].revents = 4 return 1 end
-        if #chunks > 0 then pfds[1].revents = 1 return 1 end
-        now = now + timeout
+        local next_chunk = chunks[1]
+        if type(next_chunk) == "string" then next_chunk = { at = 0, data = next_chunk } end
+        if next_chunk and now >= next_chunk.at then pfds[1].revents = 1 return 1 end
+        if next_chunk then
+          now = math.min(now + timeout, next_chunk.at)
+          if now == next_chunk.at then pfds[1].revents = 1 return 1 end
+        else
+          now = now + timeout
+        end
         return 0
       end
     }
@@ -250,14 +300,27 @@ local function real_transport_with_chunks(chunks)
   end
 end
 
-local embedded_transport, restore_embedded = real_transport_with_chunks({ table.concat({
+local raw_cmgl_transport, restore_raw_cmgl = real_transport_with_chunks({
+  { at = 0, data = table.concat({
   '+CMGL: 8,"REC READ","+8613800000000",,"26/09/05,14:31:00+32"',
-  "first line", "OK", "last line", "OK", ""
+  "first line", "OK", ""
+}, "\r\n") },
+  { at = 30, data = table.concat({ "last line", "OK", "" }, "\r\n") }
+})
+local raw_cmgl_client = at.Client.new(raw_cmgl_transport, core, { timeout_ms = 100 })
+local raw_cmgl_messages, raw_cmgl_err = raw_cmgl_client:scan()
+t.eq("delayed raw CMGL has no messages", tostring(raw_cmgl_messages == nil), "true")
+t.eq("delayed raw CMGL is ambiguous", tostring(not not (raw_cmgl_err and raw_cmgl_err:match("ambiguous"))), "true")
+restore_raw_cmgl()
+
+local encoded_transport, restore_encoded = real_transport_with_chunks({ table.concat({
+  '+CMGL: 8,"REC READ","+8613800000000",,"26/09/05,14:31:00+32"',
+  "004F004B", "OK", ""
 }, "\r\n") })
-local embedded_client = at.Client.new(embedded_transport, core, { timeout_ms = 100 })
-local embedded_messages = assert(embedded_client:scan())
-t.eq("serial CMGL preserves embedded OK", embedded_messages[1].body, "first line\nOK\nlast line")
-restore_embedded()
+local encoded_client = at.Client.new(encoded_transport, core, { timeout_ms = 100 })
+local encoded_messages = assert(encoded_client:scan())
+t.eq("serial CMGL accepts UCS2 body", encoded_messages[1].body, "OK")
+restore_encoded()
 
 local urc_transport, restore_urc = real_transport_with_chunks({ table.concat({
   '+CMGL: 9,"REC READ","+8613800000000",,"26/09/05,14:32:00+32"',

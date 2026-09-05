@@ -35,7 +35,7 @@ function Client:command(text)
   if not ok then return nil, write_err or "AT write failed" end
 
   local frame, read_err = self.transport:read_result(
-    remaining or self.timeout_ms, allowed_prefixes_for(text)
+    remaining or self.timeout_ms, allowed_prefixes_for(text), text:match("^AT%+CMGL") ~= nil
   )
   if not frame then return nil, read_err or "AT command timed out" end
 
@@ -196,10 +196,10 @@ function Transport:next_line(timeout_ms)
   end
 end
 
-function Transport:read_result(timeout_ms, allowed_prefixes)
+function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode)
   local lines = {}
   local deadline = now_ms(self.nixio) + timeout_ms
-  local terminal_deadline
+  local ambiguous_cmgl = false
   local function allowed_prefix(line)
     for _, prefix in ipairs(allowed_prefixes or {}) do
       if line:sub(1, #prefix) == prefix then return true end
@@ -209,30 +209,46 @@ function Transport:read_result(timeout_ms, allowed_prefixes)
   local function complete_frame()
     return normalize_frame(table.concat(lines, "\r\n") .. "\r\n")
   end
+  local function complete_cmgl()
+    local saw_header = false
+    for _, line in ipairs(lines) do
+      if line:match("^%+CMGL:%s*%d+") then
+        saw_header = true
+      elseif saw_header and line ~= "" and
+          (#line % 4 ~= 0 or line:find("[^0-9A-Fa-f]")) then
+        return false
+      elseif not saw_header and line ~= "" then
+        return false
+      end
+    end
+    return true
+  end
   while true do
     local line = pop_line(self)
     if line then
       if line:match('^%+CMTI:%s*"[^"]+",%s*%d+%s*$') then
         self.urcs[#self.urcs + 1] = line
       else
-        terminal_deadline = nil
         if line:match("^%+[A-Z][A-Z0-9]*:") and not is_terminal(line) and
             not allowed_prefix(line) then
           return nil, "unexpected URC in AT response: " .. line
         end
-        lines[#lines + 1] = line
         if is_terminal(line) then
-          terminal_deadline = math.min(deadline, now_ms(self.nixio) + 25)
+          if not cmgl_mode or line ~= "OK" or complete_cmgl() then
+            lines[#lines + 1] = line
+            return complete_frame()
+          end
+          ambiguous_cmgl = true
         end
+        lines[#lines + 1] = line
       end
     else
-      local remaining = (terminal_deadline or deadline) - now_ms(self.nixio)
-      if terminal_deadline and remaining <= 0 then return complete_frame() end
+      local remaining = deadline - now_ms(self.nixio)
       if remaining <= 0 then return nil, "timeout" end
       local ready, err = self:poll_read(remaining)
       if ready == nil then return nil, err end
       if not ready then
-        if terminal_deadline then return complete_frame() end
+        if ambiguous_cmgl then return nil, "ambiguous CMGL response" end
         return nil, "timeout"
       end
     end
@@ -276,11 +292,7 @@ local function wait_for_child(nixio, child, timeout_ms)
     if waited ~= false and waited ~= 0 then return waited, state, status end
 
     local remaining = deadline - now_ms(nixio)
-    if remaining <= 0 then
-      nixio.kill(child, 9)
-      nixio.waitpid(child)
-      return nil, "stty setup timeout"
-    end
+    if remaining <= 0 then return nil, "timeout" end
     nixio.poll({}, math.min(50, remaining))
   end
 end
@@ -293,6 +305,16 @@ local function configure_terminal(nixio, device, stty_executable)
     os.exit(127)
   end
   local waited, state, status = wait_for_child(nixio, child, 3000)
+  if not waited and state == "timeout" then
+    local killed, kill_err = nixio.kill(child, 9)
+    if not killed then return nil, "stty cleanup kill failed: " .. tostring(kill_err) end
+    local reaped, reap_state = wait_for_child(nixio, child, 1000)
+    if not reaped then
+      if reap_state == "timeout" then return nil, "stty cleanup timeout" end
+      return nil, "stty cleanup wait failed: " .. tostring(reap_state)
+    end
+    return nil, "stty setup timeout"
+  end
   if not waited then return nil, state or "stty failed" end
   if state ~= "exited" or status ~= 0 then
     return nil, "stty failed"
