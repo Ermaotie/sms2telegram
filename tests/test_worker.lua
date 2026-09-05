@@ -1,0 +1,199 @@
+local root = assert(arg[1], "source root required")
+local t = dofile("tests/testlib.lua")
+local worker = dofile(root .. "/usr/lib/sms2telegram/worker.lua")
+
+local digest_a = string.rep("a", 64)
+local digest_b = string.rep("b", 64)
+
+local function message(index, body)
+  return { index = index, sender = "+8613800000000", timestamp = "26/09/05,14:30:00+32", body = body or "hello" }
+end
+
+local function fixture(options)
+  options = options or {}
+  local events, records = {}, options.records or {}
+  local messages = options.messages or { message(7) }
+  local deps = {
+    core = {
+      format_parts = function(item) return { item.body } end
+    },
+    delivery = {
+      validate_credentials = function(token, chat_id)
+        if token == "token" and chat_id == "chat" then return true end
+        return nil, "invalid credentials"
+      end,
+      fingerprint = function(item) return item.body == "changed" and digest_b or digest_a end,
+      route_allowed = function(output, allowed)
+        if output == allowed then return true end
+        return nil, "route blocked"
+      end
+    },
+    at_client = {
+      scan = function()
+        events[#events + 1] = "scan"
+        return messages
+      end,
+      delete = function(_, index)
+        events[#events + 1] = "delete"
+        if options.delete_fails then return nil, "delete failed" end
+        return true
+      end
+    },
+    sender = {
+      send_parts = function(_, _, _, parts)
+        events[#events + 1] = "send"
+        if options.send_fails then return nil, "send failed" end
+        return true
+      end
+    },
+    ledger = {
+      contains = function(_, index, digest) return records[tostring(index)] == digest end,
+      add = function(_, index, digest)
+        events[#events + 1] = "ledger-add"
+        records[tostring(index)] = digest
+        return true
+      end,
+      remove = function(_, index, digest)
+        events[#events + 1] = "ledger-remove"
+        if records[tostring(index)] ~= digest then return nil, "missing record" end
+        records[tostring(index)] = nil
+        return true
+      end,
+      save_atomic = function()
+        events[#events + 1] = "ledger-save"
+        return true
+      end
+    },
+    route = function()
+      events[#events + 1] = "route"
+      return options.route or "eth0"
+    end
+  }
+  return deps, events, records
+end
+
+local function cycle(options, config)
+  local deps, events, records = fixture(options)
+  local instance = worker.new(deps, config or {
+    bot_token = "token", chat_id = "chat", allowed_wan_device = "eth0", telegram_limit = 4096
+  })
+  local ok, err = instance:cycle()
+  return ok, err, events, records
+end
+
+-- Removing the early credential gate would expose the modem or confirmation state.
+local empty_ok, empty_err, empty_events = cycle({}, { bot_token = "", chat_id = "" })
+t.eq("missing credentials result", empty_ok, nil)
+t.eq("missing credentials category", empty_err, "config")
+t.eq("missing credentials have zero operations", #empty_events, 0)
+
+-- Changing the route gate to accept eth2 would leak delivery onto the modem link.
+local route_ok, route_err, route_events, route_records = cycle({ route = "eth2" })
+t.eq("eth2 route result", route_ok, nil)
+t.eq("eth2 route category", route_err, "route")
+t.eq("eth2 route order", table.concat(route_events, ","), "scan,route")
+t.eq("eth2 leaves ledger unchanged", route_records["7"], nil)
+
+-- Marking after a failed Telegram request would make retries silently disappear.
+local send_ok, send_err, send_events, send_records = cycle({ send_fails = true })
+t.eq("Telegram failure result", send_ok, nil)
+t.eq("Telegram failure category", send_err, "telegram")
+t.eq("Telegram failure order", table.concat(send_events, ","), "scan,route,send")
+t.eq("Telegram failure leaves ledger unchanged", send_records["7"], nil)
+
+local success_ok, success_err, events = cycle()
+t.eq("successful delivery result", success_ok, true)
+t.eq("successful delivery error", success_err, nil)
+t.eq("delivery order", table.concat(events, ","),
+  "scan,route,send,ledger-add,ledger-save,delete,ledger-remove,ledger-save")
+
+-- Removing a confirmation after a failed delete would cause a duplicate send.
+local delete_ok, delete_err, delete_events, delete_records = cycle({ delete_fails = true })
+t.eq("delete failure result", delete_ok, nil)
+t.eq("delete failure category", delete_err, "at")
+t.eq("delete failure keeps confirmation", delete_records["7"], digest_a)
+t.eq("delete failure order", table.concat(delete_events, ","), "scan,route,send,ledger-add,ledger-save,delete")
+
+local recover_ok, recover_err, recover_events, recover_records = cycle({ records = { ["7"] = digest_a } })
+t.eq("matching ledger cleanup result", recover_ok, true)
+t.eq("matching ledger cleanup error", recover_err, nil)
+t.eq("matching ledger skips Telegram", table.concat(recover_events, ","), "scan,delete,ledger-remove,ledger-save")
+t.eq("matching ledger cleanup removes record", recover_records["7"], nil)
+
+local reuse_ok, reuse_err, reuse_events = cycle({ records = { ["7"] = digest_a }, messages = { message(7, "changed") } })
+t.eq("reused index result", reuse_ok, true)
+t.eq("reused index error", reuse_err, nil)
+t.eq("reused index sends new fingerprint", table.concat(reuse_events, ","),
+  "scan,route,send,ledger-add,ledger-save,delete,ledger-remove,ledger-save")
+
+local cleanup_ok, cleanup_err, cleanup_events, cleanup_records = cycle({ records = { ["7"] = digest_a } })
+t.eq("successful delete cleanup result", cleanup_ok, true)
+t.eq("successful delete cleanup error", cleanup_err, nil)
+t.eq("successful delete cleanup order", table.concat(cleanup_events, ","), "scan,delete,ledger-remove,ledger-save")
+t.eq("successful delete removes ledger entry", cleanup_records["7"], nil)
+
+-- A send failure must not undo independent cleanup of an already-confirmed record.
+local mixed_ok, mixed_err, mixed_events, mixed_records = cycle({
+  send_fails = true,
+  records = { ["7"] = digest_a },
+  messages = { message(7), message(8, "new") }
+})
+t.eq("mixed messages result", mixed_ok, nil)
+t.eq("mixed messages category", mixed_err, "telegram")
+t.eq("mixed messages order", table.concat(mixed_events, ","), "scan,delete,ledger-remove,ledger-save,route,send")
+t.eq("mixed failed new record not confirmed", mixed_records["8"], nil)
+t.eq("mixed confirmed record cleaned", mixed_records["7"], nil)
+
+local function quote(value)
+  return "'" .. value:gsub("'", "'\"'\"'") .. "'"
+end
+
+local function shell_status(command)
+  local a, _, c = os.execute(command)
+  if type(a) == "number" then return a end
+  if a then return 0 end
+  return c or 1
+end
+
+local function write_file(path, contents)
+  local file = assert(io.open(path, "wb"))
+  assert(file:write(contents))
+  assert(file:close())
+end
+
+-- If the daemon opened AT before checking UCI credentials, this fake records it.
+local temp = "/tmp/sms2telegram-worker-process-" .. tostring(os.time())
+assert(shell_status("mkdir -p " .. quote(temp .. "/lib") .. " " .. quote(temp .. "/bin")) == 0)
+assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/core.lua") .. " " .. quote(temp .. "/lib/core.lua")) == 0)
+assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/delivery.lua") .. " " .. quote(temp .. "/lib/delivery.lua")) == 0)
+assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/worker.lua") .. " " .. quote(temp .. "/lib/worker.lua")) == 0)
+write_file(temp .. "/bin/uci", [[#!/bin/sh
+case "$3" in
+  device) printf '/dev/fake\n' ;;
+  storage) printf 'SM\n' ;;
+  allowed_wan_device) printf 'eth0\n' ;;
+  poll_interval|retry_initial|retry_max) printf '1\n' ;;
+esac
+]])
+assert(shell_status("chmod 700 " .. quote(temp .. "/bin/uci")) == 0)
+write_file(temp .. "/lib/at.lua", [[local M = { Client = {} }
+function M.open_nixio_transport()
+  local log = assert(io.open(os.getenv("SMS2TELEGRAM_AT_LOG"), "ab"))
+  log:write("open\n")
+  log:close()
+  return nil, "should not open"
+end
+return M
+]])
+local at_log = temp .. "/at.log"
+local process_command = "PATH=" .. quote(temp .. "/bin") .. ":$PATH " ..
+  "SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") .. " " ..
+  "SMS2TELEGRAM_AT_LOG=" .. quote(at_log) .. " " .. quote(root .. "/usr/sbin/sms2telegram") ..
+  " >/dev/null 2>&1 & child=$!; sleep 2; kill -0 $child; alive=$?; kill $child 2>/dev/null; wait $child 2>/dev/null; exit $alive"
+t.eq("empty-config daemon stays alive", shell_status("sh -c " .. quote(process_command)), 0)
+local log = io.open(at_log, "rb")
+t.eq("empty-config daemon makes zero AT opens", log and log:read("*a") or "", "")
+if log then log:close() end
+shell_status("rm -rf " .. quote(temp))
+
+t.finish()
