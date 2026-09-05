@@ -75,4 +75,173 @@ function M.utf8_prefix(text, max_chars)
   return text:sub(1, pos - 1), text:sub(pos)
 end
 
+local function is_ucs2_hex(value)
+  return type(value) == "string" and #value > 0 and #value % 4 == 0 and
+    not value:find("[^0-9A-Fa-f]")
+end
+
+local function decode_text(value)
+  if not is_ucs2_hex(value) then return value end
+  return M.ucs2_to_utf8(value)
+end
+
+local function csv_fields(line)
+  local fields, pos = {}, 1
+  while true do
+    if pos > #line then
+      fields[#fields + 1] = ""
+      return fields
+    end
+
+    local field = {}
+    if line:sub(pos, pos) == '"' then
+      pos = pos + 1
+      while true do
+        local byte = line:sub(pos, pos)
+        if byte == "" then return nil, "unterminated quoted CMGL field" end
+        if byte == '"' then
+          if line:sub(pos + 1, pos + 1) == '"' then
+            field[#field + 1] = '"'
+            pos = pos + 2
+          else
+            pos = pos + 1
+            if pos <= #line and line:sub(pos, pos) ~= "," then
+              return nil, "invalid quoted CMGL field"
+            end
+            break
+          end
+        else
+          field[#field + 1] = byte
+          pos = pos + 1
+        end
+      end
+    else
+      local start = pos
+      while pos <= #line and line:sub(pos, pos) ~= "," do
+        if line:sub(pos, pos) == '"' then return nil, "invalid CMGL field" end
+        pos = pos + 1
+      end
+      field[#field + 1] = line:sub(start, pos - 1)
+    end
+
+    fields[#fields + 1] = table.concat(field)
+    if pos > #line then return fields end
+    pos = pos + 1
+  end
+end
+
+local function decode_body(lines)
+  local joined = table.concat(lines)
+  if is_ucs2_hex(joined) then return M.ucs2_to_utf8(joined) end
+
+  local decoded = {}
+  for i, line in ipairs(lines) do
+    local text, err = decode_text(line)
+    if not text then return nil, err end
+    decoded[i] = text
+  end
+  return table.concat(decoded, "\n")
+end
+
+function M.parse_cmgl(response)
+  if type(response) ~= "string" then return nil, "CMGL response must be a string" end
+  response = response:gsub("\r\n", "\n"):gsub("\r", "\n")
+
+  local messages, current, terminal = {}, nil, false
+  local function finish_record()
+    if not current then return true end
+    local sender, sender_err = decode_text(current.fields[3])
+    if not sender then return nil, sender_err end
+    local body, body_err = decode_body(current.body_lines)
+    if not body then return nil, body_err end
+    local fields = current.fields
+    if #fields < 5 or not tonumber(fields[1]) then
+      return nil, "malformed CMGL header"
+    end
+    messages[#messages + 1] = {
+      index = assert(tonumber(fields[1])),
+      status = fields[2],
+      sender = sender,
+      timestamp = fields[5] or "",
+      body = body
+    }
+    current = nil
+    return true
+  end
+
+  for line in (response .. "\n"):gmatch("(.-)\n") do
+    local header = line:match("^%+CMGL:%s*(.*)$")
+    if header then
+      local ok, err = finish_record()
+      if not ok then return nil, err end
+      local fields, fields_err = csv_fields(header)
+      if not fields or #fields < 5 or not tonumber(fields[1]) then
+        return nil, fields_err or "malformed CMGL header"
+      end
+      current = { fields = fields, body_lines = {} }
+    elseif line == "OK" then
+      local ok, err = finish_record()
+      if not ok then return nil, err end
+      terminal = true
+    elseif line:match("^ERROR$") or line:match("^%+CMS ERROR") then
+      return nil, "CMGL command failed"
+    elseif current then
+      current.body_lines[#current.body_lines + 1] = line
+    elseif terminal and line ~= "" then
+      return nil, "unexpected data after CMGL terminal status"
+    end
+  end
+
+  if not terminal then return nil, "missing CMGL terminal status" end
+  return messages
+end
+
+local function metadata_for(message)
+  return "📩 短信信息\n来自：" .. message.sender .. "\n时间：" .. message.timestamp
+end
+
+local function split_body(body, limit, metadata, count)
+  local suffix = "\n\n[1/" .. count .. "]\n" .. metadata
+  local available = limit - M.utf8_length(suffix)
+  if available < 1 then error("Telegram limit is too small for SMS metadata") end
+
+  local parts, remaining = {}, body
+  while #remaining > 0 do
+    local prefix
+    prefix, remaining = M.utf8_prefix(remaining, available)
+    parts[#parts + 1] = prefix
+  end
+  return parts
+end
+
+function M.format_parts(message, limit)
+  local metadata = metadata_for(message)
+  local body = message.body
+  if M.utf8_length(body .. "\n\n" .. metadata) <= limit then
+    return { body .. "\n\n" .. metadata }
+  end
+
+  local bodies = split_body(body, limit, metadata, 1)
+  bodies = split_body(body, limit, metadata, #bodies)
+  local parts = {}
+  for i, part in ipairs(bodies) do
+    parts[i] = part .. "\n\n[" .. i .. "/" .. #bodies .. "]\n" .. metadata
+  end
+  return parts
+end
+
+function M.route_device(route_output)
+  local previous
+  for token in route_output:gmatch("%S+") do
+    if previous == "dev" then return token end
+    previous = token
+  end
+  return nil
+end
+
+function M.next_backoff(current, initial, maximum)
+  if not current then return initial end
+  return math.min(current * 2, maximum)
+end
+
 return M
