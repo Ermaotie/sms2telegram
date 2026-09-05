@@ -1,0 +1,68 @@
+#!/bin/sh
+# This check is deliberately read-only: it neither installs the IPK nor changes UCI.
+set -eu
+
+STTY_BIN=${STTY_BIN:-/tmp/sms2telegram-stty/usr/bin/stty}
+TMP=${TMPDIR:-/tmp}/sms2telegram-router-smoke-$$
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+mkdir -p "$TMP"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+pass() { echo "PASS: $*"; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"; }
+
+need lua
+need curl
+need jsonfilter
+need sha256sum
+lua -e 'assert(_VERSION == "Lua 5.1"); assert(require("nixio"))' || fail "Lua 5.1 with nixio is required"
+pass "Lua 5.1 and nixio"
+
+[ -r /etc/ssl/certs/ca-certificates.crt ] || [ -r /etc/ssl/cert.pem ] || fail "CA bundle is unavailable"
+pass "curl, jsonfilter, sha256sum, and CA bundle"
+
+route=$(ip -4 route get 1.1.1.1 2>&1) || fail "unable to inspect IPv4 route"
+set -- $route
+device=
+previous=
+for token in "$@"; do
+    [ "$previous" = dev ] && device=$token
+    previous=$token
+done
+[ "$device" = eth0 ] || fail "default route device is '${device:-unknown}', expected eth0"
+pass "eth0 default route"
+
+/etc/init.d/openclash enabled >/dev/null 2>&1 || fail "OpenClash is not enabled"
+pass "OpenClash enabled"
+
+# No token is used: this only verifies public HTTPS reachability through normal router output.
+curl --silent --show-error --connect-timeout 10 --max-time 20 --output "$TMP/telegram.json" \
+    --write-out '%{http_code}' https://api.telegram.org/ > "$TMP/http-code" || fail "Telegram HTTPS reachability failed"
+[ "$(cat "$TMP/http-code")" = 404 ] || fail "Telegram API reachability returned unexpected HTTP status"
+pass "Telegram HTTPS reachable without credentials"
+
+[ -x "$STTY_BIN" ] || fail "stty unavailable; extract coreutils-stty to /tmp/sms2telegram-stty or set STTY_BIN"
+[ -c /dev/ttyACM0 ] || fail "modem device /dev/ttyACM0 is unavailable"
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cp "$ROOT/src/usr/lib/sms2telegram/at.lua" "$TMP/at.lua"
+cp "$ROOT/src/usr/lib/sms2telegram/core.lua" "$TMP/core.lua"
+cat > "$TMP/probe.lua" <<'EOF'
+local at = dofile(arg[1] .. "/at.lua")
+local core = dofile(arg[1] .. "/core.lua")
+local transport, err = at.open_nixio_transport("/dev/ttyACM0", 115200, arg[2])
+assert(transport, err)
+local client = at.Client.new(transport, core, { timeout_ms = 5000 })
+for _, command in ipairs({ "AT", "ATI", "AT+CMGF=?", "AT+CPMS=?", "AT+CNMI=?" }) do
+  local frame, command_err = client:command(command)
+  assert(frame, command_err)
+  io.write(frame, "\n")
+end
+transport:close()
+EOF
+lua "$TMP/probe.lua" "$TMP" "$STTY_BIN" > "$TMP/modem.txt" || fail "non-destructive modem capability probes failed"
+grep -F 'Air780EPV' "$TMP/modem.txt" >/dev/null || fail "unexpected modem identity"
+grep -F '+CMGF: (0-1)' "$TMP/modem.txt" >/dev/null || fail "text SMS mode capability missing"
+grep -F 'SM' "$TMP/modem.txt" >/dev/null || fail "SIM SMS storage capability missing"
+grep -F '+CNMI:' "$TMP/modem.txt" >/dev/null || fail "CNMI capability missing"
+pass "Air780EPV non-destructive SMS capabilities"

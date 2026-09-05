@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+[ -z "${IPKG_INSTROOT:-}" ] || exit 0
+/etc/init.d/sms2telegram stop
+/etc/init.d/sms2telegram disable

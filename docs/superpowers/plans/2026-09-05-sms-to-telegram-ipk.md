@@ -589,7 +589,7 @@ git commit -m "feat: add OpenWrt service and operator guide"
 - Consumes: complete `src/` root filesystem tree.
 - Produces: installable IPK and checksum.
 
-- [ ] **Step 1: Write failing package archive tests**
+- [x] **Step 1: Write failing package archive tests**
 
 `tests/test_package.sh` accepts the IPK path, extracts its ar members into a new temporary directory, and asserts:
 
@@ -603,11 +603,11 @@ git commit -m "feat: add OpenWrt service and operator guide"
 - prerm stops and disables only when `IPKG_INSTROOT` is empty;
 - extracting the IPK does not contain the values from `router.txt`.
 
-- [ ] **Step 2: Verify RED locally**
+- [x] **Step 2: Verify RED locally**
 
 Run `sh tests/test_package.sh dist/sms2telegram_1.0.0_all.ipk`. Expected: nonzero exit because the IPK is absent.
 
-- [ ] **Step 3: Add exact control metadata and lifecycle scripts**
+- [x] **Step 3: Add exact control metadata and lifecycle scripts**
 
 Use this control metadata:
 
@@ -624,7 +624,7 @@ Description: Forward stored Air780EPV SMS messages to Telegram using the router 
 
 `conffiles` contains `/etc/config/sms2telegram`. `postinst` exits immediately for a nonempty `IPKG_INSTROOT`; otherwise it runs enable then restart and propagates failure. `prerm` follows the same root guard and runs stop then disable.
 
-- [ ] **Step 4: Implement deterministic package assembly**
+- [x] **Step 4: Implement deterministic package assembly**
 
 `scripts/build-ipk.sh` uses `set -eu`, resolves the repository root from its own path, creates a fresh `build/ipk/` tree, copies `src/`, applies exact modes, creates sorted gzip-compressed control and data tar archives, writes `debian-binary`, then calls `ar rcs` in member order. It rejects any empty source file and scans the staging tree for the router password before packaging.
 
@@ -636,7 +636,7 @@ ar rcs "$repo/dist/sms2telegram_1.0.0_all.ipk" debian-binary control.tar.gz data
 sha256sum "$repo/dist/sms2telegram_1.0.0_all.ipk" > "$repo/dist/sms2telegram_1.0.0_all.ipk.sha256"
 ```
 
-- [ ] **Step 5: Build and verify the package locally**
+- [x] **Step 5: Build and verify the package locally**
 
 Run:
 
@@ -648,7 +648,7 @@ shasum -a 256 -c dist/sms2telegram_1.0.0_all.ipk.sha256
 
 Expected: build exits 0, package test reports every assertion as passing, and checksum reports `OK`.
 
-- [ ] **Step 6: Run full regression tests on the router and non-destructive smoke checks**
+- [ ] **Step 6: Run full regression tests on the router and non-destructive smoke checks** (controller-owned: this host has neither Lua 5.1/nixio nor router access)
 
 Copy `src/`, `tests/*.lua`, and `tests/router-smoke.sh` to `/tmp/sms2telegram-dev/`. Run:
 
@@ -663,7 +663,7 @@ sh tests/router-smoke.sh
 
 `router-smoke.sh` must assert Lua 5.1, `nixio`, curl, CA bundle, `jsonfilter`, `sha256sum`, default route device `eth0`, OpenClash enabled, Telegram API reachability through the router output path, modem identity Air780EPV, and supported SMS query ranges. It must not use `CMGL`, `CMGR`, `CMGD`, a Bot Token, or `sendMessage`.
 
-- [ ] **Step 7: Inspect the archive exactly as opkg will see it**
+- [x] **Step 7: Inspect the archive exactly as opkg will see it**
 
 List control and data archives, then verify no credentials or unexpected paths:
 
@@ -678,7 +678,7 @@ tar -tzf data.tar.gz
 
 Expected: only the specified package members and root filesystem paths appear; neither router credentials nor Telegram credentials are present.
 
-- [ ] **Step 8: Commit source and packaging metadata, then record final evidence**
+- [x] **Step 8: Commit source and packaging metadata, then record final evidence**
 
 Run fresh verification again before the commit, then:
 
