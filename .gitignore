@@ -3,3 +3,5 @@ router.txt
 build/
 dist/*.ipk
 dist/*.sha256
+.worktrees/
+.superpowers/
