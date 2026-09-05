@@ -147,6 +147,18 @@ function M.parse_cmgl(response)
   if type(response) ~= "string" then return nil, "CMGL response must be a string" end
   response = response:gsub("\r\n", "\n"):gsub("\r", "\n")
 
+  local lines = {}
+  for line in (response .. "\n"):gmatch("(.-)\n") do
+    lines[#lines + 1] = line
+  end
+  local terminal_index
+  for i = #lines, 1, -1 do
+    if lines[i] ~= "" then
+      if lines[i] == "OK" then terminal_index = i end
+      break
+    end
+  end
+
   local messages, current, terminal = {}, nil, false
   local function finish_record()
     if not current then return true end
@@ -169,7 +181,7 @@ function M.parse_cmgl(response)
     return true
   end
 
-  for line in (response .. "\n"):gmatch("(.-)\n") do
+  for i, line in ipairs(lines) do
     local header = line:match("^%+CMGL:%s*(.*)$")
     if header then
       local ok, err = finish_record()
@@ -179,7 +191,7 @@ function M.parse_cmgl(response)
         return nil, fields_err or "malformed CMGL header"
       end
       current = { fields = fields, body_lines = {} }
-    elseif line == "OK" then
+    elseif i == terminal_index then
       local ok, err = finish_record()
       if not ok then return nil, err end
       terminal = true
@@ -201,7 +213,9 @@ local function metadata_for(message)
 end
 
 local function split_body(body, limit, metadata, count)
-  local suffix = "\n\n[1/" .. count .. "]\n" .. metadata
+  local count_text = tostring(count)
+  local widest_index = string.rep("9", #count_text)
+  local suffix = "\n\n[" .. widest_index .. "/" .. count_text .. "]\n" .. metadata
   local available = limit - M.utf8_length(suffix)
   if available < 1 then error("Telegram limit is too small for SMS metadata") end
 
@@ -221,8 +235,14 @@ function M.format_parts(message, limit)
     return { body .. "\n\n" .. metadata }
   end
 
-  local bodies = split_body(body, limit, metadata, 1)
-  bodies = split_body(body, limit, metadata, #bodies)
+  local count = 1
+  local bodies
+  while true do
+    bodies = split_body(body, limit, metadata, count)
+    local final_count = #bodies
+    if #tostring(final_count) == #tostring(count) then break end
+    count = final_count
+  end
   local parts = {}
   for i, part in ipairs(bodies) do
     parts[i] = part .. "\n\n[" .. i .. "/" .. #bodies .. "]\n" .. metadata

@@ -57,4 +57,26 @@ for i, part in ipairs(long_parts) do
   t.eq("long part starts with body " .. i, part:sub(1, 1), "A")
   t.truthy("long part repeats metadata " .. i, part:find(long_metadata, 1, true))
 end
+
+local ok_body_response = table.concat({
+  '+CMGL: 8,"REC READ","+8613800000000",,"26/09/05,14:31:00+32"',
+  'first line',
+  'OK',
+  'last line',
+  'OK',
+  ''
+}, '\r\n')
+local ok_body_messages = assert(core.parse_cmgl(ok_body_response))
+t.eq("preserves body OK line", ok_body_messages[1].body, "first line\nOK\nlast line")
+
+local ten_part_message = {
+  sender = "+8613800000000",
+  timestamp = "26/09/05,14:30:00+32",
+  body = string.rep("B", 40440)
+}
+local ten_parts = core.format_parts(ten_part_message, 4096)
+t.truthy("two-digit multipart count", #ten_parts >= 10)
+for i, part in ipairs(ten_parts) do
+  t.eq("two-digit part fits " .. i, tostring(core.utf8_length(part) <= 4096), "true")
+end
 t.finish()
