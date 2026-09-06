@@ -9,8 +9,16 @@ http_status_proves_reachability() {
     esac
 }
 
+modem_identity_matches() {
+    grep -Fq 'AirM2M_780EPV'
+}
+
 if [ "${1:-}" = "--check-http-status" ]; then
     if http_status_proves_reachability "${2:-}"; then exit 0; fi
+    exit 1
+fi
+if [ "${1:-}" = "--check-modem-identity" ]; then
+    if modem_identity_matches; then exit 0; fi
     exit 1
 fi
 
@@ -73,8 +81,8 @@ end
 transport:close()
 EOF
 lua "$TMP/probe.lua" "$TMP" "$STTY_BIN" > "$TMP/modem.txt" || fail "non-destructive modem capability probes failed"
-grep -F 'Air780EPV' "$TMP/modem.txt" >/dev/null || fail "unexpected modem identity"
+modem_identity_matches < "$TMP/modem.txt" || fail "unexpected modem identity"
 grep -F '+CMGF: (0-1)' "$TMP/modem.txt" >/dev/null || fail "text SMS mode capability missing"
 grep -F 'SM' "$TMP/modem.txt" >/dev/null || fail "SIM SMS storage capability missing"
 grep -F '+CNMI:' "$TMP/modem.txt" >/dev/null || fail "CNMI capability missing"
-pass "Air780EPV non-destructive SMS capabilities"
+pass "AirM2M_780EPV non-destructive SMS capabilities"

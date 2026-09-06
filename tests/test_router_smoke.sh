@@ -25,4 +25,21 @@ rejects 500
 rejects 99
 rejects abc
 
-echo "PASS router smoke HTTP status policy"
+accepts_identity() {
+    if ! printf '%s\n' "$1" | "$ROOT/tests/router-smoke.sh" --check-modem-identity; then
+        fail "expected AirM2M_780EPV ATI fixture to be accepted"
+    fi
+}
+
+rejects_identity() {
+    if printf '%s\n' "$1" | "$ROOT/tests/router-smoke.sh" --check-modem-identity; then
+        fail "expected unrelated ATI fixture to be rejected"
+    fi
+}
+
+# A literal Air780EPV substring check misses the actual AirM2M ATI identity.
+accepts_identity 'AirM2M_780EPV_V1009_LTE_AT'
+rejects_identity 'Air780EPV_V1009_LTE_AT'
+rejects_identity 'AirM2M_700EPV_V1009_LTE_AT'
+
+echo "PASS router smoke HTTP status and modem identity policy"
