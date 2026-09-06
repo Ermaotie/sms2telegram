@@ -102,28 +102,30 @@ if find "$STAGE" -type f \( -name 'router.txt' -o -name 'tg_setting.txt' \) -pri
 fi
 
 # When a credential file is supplied, check it quietly and never print its value.
-COMMON_GIT_DIR=$(git -C "$REPO" rev-parse --git-common-dir)
-case "$COMMON_GIT_DIR" in /*) ;; *) COMMON_GIT_DIR="$REPO/$COMMON_GIT_DIR";; esac
-MAIN_WORKSPACE=$(CDPATH= cd -- "$(dirname -- "$COMMON_GIT_DIR")" && pwd)
-ROUTER_SOURCE=${ROUTER_SECRET_FILE:-$MAIN_WORKSPACE/router.txt}
-TELEGRAM_SOURCE=${TELEGRAM_SECRET_FILE:-$MAIN_WORKSPACE/tg_setting.txt}
+if [ -n "${ROUTER_SECRET_FILE:-}" ] && [ -n "${TELEGRAM_SECRET_FILE:-}" ]; then
+    ROUTER_SOURCE=$ROUTER_SECRET_FILE
+    TELEGRAM_SOURCE=$TELEGRAM_SECRET_FILE
+else
+    if COMMON_GIT_DIR=$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null); then
+        case "$COMMON_GIT_DIR" in /*) ;; *) COMMON_GIT_DIR="$REPO/$COMMON_GIT_DIR";; esac
+        MAIN_WORKSPACE=$(CDPATH= cd -- "$(dirname -- "$COMMON_GIT_DIR")" && pwd)
+    else
+        MAIN_WORKSPACE=$REPO
+    fi
+    ROUTER_SOURCE=${ROUTER_SECRET_FILE:-$MAIN_WORKSPACE/router.txt}
+    TELEGRAM_SOURCE=${TELEGRAM_SECRET_FILE:-$MAIN_WORKSPACE/tg_setting.txt}
+fi
 scan_secrets "$STAGE" "$CONTROL" "$ROUTER_SOURCE" "$TELEGRAM_SOURCE"
 
 (
     cd "$CONTROL"
-    if [ "$(tar_style)" = gnu ]; then
-        LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar --format=ustar --owner=0 --group=0 --numeric-owner -cf "$BUILD/control.tar"
-    else
-        LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar --format ustar --uid 0 --gid 0 --numeric-owner -cf "$BUILD/control.tar"
-    fi
+    set -- $(tar_flags_for "$(tar_style)")
+    LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar "$@" -cf "$BUILD/control.tar"
 )
 (
     cd "$STAGE"
-    if [ "$(tar_style)" = gnu ]; then
-        LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar --format=ustar --owner=0 --group=0 --numeric-owner -cf "$BUILD/data.tar"
-    else
-        LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar --format ustar --uid 0 --gid 0 --numeric-owner -cf "$BUILD/data.tar"
-    fi
+    set -- $(tar_flags_for "$(tar_style)")
+    LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar "$@" -cf "$BUILD/data.tar"
 )
 gzip -n -f "$BUILD/control.tar"
 gzip -n -f "$BUILD/data.tar"

@@ -30,4 +30,22 @@ fi
 printf 'ordinary router host line\nordinary IP line\n' > "$TMP/stage/leak"
 sh "$ROOT/scripts/build-ipk.sh" --check-secret-scan "$TMP/stage" "$TMP/control" "$TMP/router.txt" "$TMP/tg_setting.txt" || fail "ordinary router fields were treated as secrets"
 
+mkdir -p "$TMP/export" "$TMP/bin"
+cp -R "$ROOT/src" "$ROOT/ipk" "$ROOT/scripts" "$TMP/export/"
+cat > "$TMP/bin/git" <<'EOF'
+#!/bin/sh
+exit 127
+EOF
+chmod 700 "$TMP/bin/git"
+PATH="$TMP/bin:$PATH" ROUTER_SECRET_FILE="$TMP/router.txt" TELEGRAM_SECRET_FILE="$TMP/tg_setting.txt" \
+    sh "$TMP/export/scripts/build-ipk.sh" || fail "explicit sources should build without Git metadata"
+no_source_output=$(PATH="$TMP/bin:$PATH" sh "$TMP/export/scripts/build-ipk.sh" 2>&1) || fail "export tree without sources should still build"
+printf '%s\n' "$no_source_output" | grep -F 'secret scan not verified: no discoverable credential source' >/dev/null ||
+    fail "export tree did not report missing credential sources"
+mkdir -p "$TMP/export/tests"
+cp "$ROOT/tests/test_package.sh" "$TMP/export/tests/"
+PATH="$TMP/bin:$PATH" ROUTER_SECRET_FILE="$TMP/router.txt" TELEGRAM_SECRET_FILE="$TMP/tg_setting.txt" \
+    sh "$TMP/export/tests/test_package.sh" "$TMP/export/dist/sms2telegram_1.0.0_all.ipk" ||
+    fail "package test should accept explicit sources without Git metadata"
+
 echo "PASS tar portability and exact secret scan fixtures"

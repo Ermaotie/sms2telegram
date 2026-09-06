@@ -90,11 +90,19 @@ pass "staged modes"
 if find "$TMP/data" -type f \( -name '*test*' -o -name 'router.txt' -o -name 'tg_setting.txt' \) | grep . >/dev/null; then
     fail "data archive contains a test or sensitive file"
 fi
-COMMON_GIT_DIR=$(git -C "$ROOT" rev-parse --git-common-dir)
-case "$COMMON_GIT_DIR" in /*) ;; *) COMMON_GIT_DIR="$ROOT/$COMMON_GIT_DIR";; esac
-MAIN_WORKSPACE=$(CDPATH= cd -- "$(dirname -- "$COMMON_GIT_DIR")" && pwd)
-ROUTER_SOURCE=${ROUTER_SECRET_FILE:-$MAIN_WORKSPACE/router.txt}
-TELEGRAM_SOURCE=${TELEGRAM_SECRET_FILE:-$MAIN_WORKSPACE/tg_setting.txt}
+if [ -n "${ROUTER_SECRET_FILE:-}" ] && [ -n "${TELEGRAM_SECRET_FILE:-}" ]; then
+    ROUTER_SOURCE=$ROUTER_SECRET_FILE
+    TELEGRAM_SOURCE=$TELEGRAM_SECRET_FILE
+else
+    if COMMON_GIT_DIR=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null); then
+        case "$COMMON_GIT_DIR" in /*) ;; *) COMMON_GIT_DIR="$ROOT/$COMMON_GIT_DIR";; esac
+        MAIN_WORKSPACE=$(CDPATH= cd -- "$(dirname -- "$COMMON_GIT_DIR")" && pwd)
+    else
+        MAIN_WORKSPACE=$ROOT
+    fi
+    ROUTER_SOURCE=${ROUTER_SECRET_FILE:-$MAIN_WORKSPACE/router.txt}
+    TELEGRAM_SOURCE=${TELEGRAM_SECRET_FILE:-$MAIN_WORKSPACE/tg_setting.txt}
+fi
 sh "$ROOT/scripts/build-ipk.sh" --check-secret-scan "$TMP/data" "$TMP/control" "$ROUTER_SOURCE" "$TELEGRAM_SOURCE" ||
     fail "archive contains configured secret"
 pass "no test or secret files"
