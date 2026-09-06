@@ -7,6 +7,62 @@ STAGE="$BUILD/data"
 CONTROL="$BUILD/control"
 PACKAGE=sms2telegram_1.0.0_all.ipk
 
+tar_flags_for() {
+    case "$1" in
+        bsd) printf '%s\n' '--format ustar --uid 0 --gid 0 --numeric-owner' ;;
+        gnu) printf '%s\n' '--format=ustar --owner=0 --group=0 --numeric-owner' ;;
+        *) return 1 ;;
+    esac
+}
+
+tar_style() {
+    if tar --version 2>/dev/null | head -n 1 | grep -q 'GNU tar'; then
+        printf '%s\n' gnu
+    else
+        printf '%s\n' bsd
+    fi
+}
+
+append_router_secret() {
+    file=$1
+    [ -r "$file" ] || return 0
+    lines=$(awk 'NF { count++; values[count] = $0 } END { if (count == 3) print values[3] }' "$file")
+    [ -z "$lines" ] || printf '%s\n' "$lines" >> "$SECRET_PATTERNS"
+}
+
+append_telegram_secrets() {
+    file=$1
+    [ -r "$file" ] || return 0
+    awk 'index($0, ":") { value = substr($0, index($0, ":") + 1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); if (value != "") print value }' "$file" >> "$SECRET_PATTERNS"
+}
+
+scan_secrets() {
+    scan_stage=$1
+    scan_control=$2
+    scan_router=${3:-}
+    scan_telegram=${4:-}
+    umask 077
+    SECRET_PATTERNS=$(mktemp "${TMPDIR:-/tmp}/sms2telegram-secret-patterns.XXXXXX")
+    chmod 0600 "$SECRET_PATTERNS"
+    trap 'rm -f "$SECRET_PATTERNS"' EXIT HUP INT TERM
+    [ -n "$scan_router" ] && append_router_secret "$scan_router"
+    [ -n "$scan_telegram" ] && append_telegram_secrets "$scan_telegram"
+    if [ ! -s "$SECRET_PATTERNS" ]; then
+        echo "secret scan not verified: no discoverable credential source" >&2
+        return 0
+    fi
+    if find "$scan_stage" "$scan_control" -type f -exec grep -F -q -f "$SECRET_PATTERNS" {} \; -print | grep -q .; then
+        echo "refusing to package configured secret" >&2
+        return 1
+    fi
+}
+
+if [ "${1:-}" = "--tar-flags-for" ]; then tar_flags_for "${2:-}"; exit $?; fi
+if [ "${1:-}" = "--check-secret-scan" ]; then
+    scan_secrets "${2:?stage required}" "${3:?control required}" "${4:-}" "${5:-}"
+    exit $?
+fi
+
 create_portable_ar() {
     output=$1
     shift
@@ -46,23 +102,28 @@ if find "$STAGE" -type f \( -name 'router.txt' -o -name 'tg_setting.txt' \) -pri
 fi
 
 # When a credential file is supplied, check it quietly and never print its value.
-if [ -n "${ROUTER_SECRET_FILE:-}" ]; then
-    [ -r "$ROUTER_SECRET_FILE" ] || { echo "ROUTER_SECRET_FILE is unreadable" >&2; exit 1; }
-    if find "$STAGE" -type f -exec grep -F -q -f "$ROUTER_SECRET_FILE" {} \; -print | grep -q .; then
-        echo "refusing to package configured router secret" >&2
-        exit 1
-    fi
-fi
+COMMON_GIT_DIR=$(git -C "$REPO" rev-parse --git-common-dir)
+case "$COMMON_GIT_DIR" in /*) ;; *) COMMON_GIT_DIR="$REPO/$COMMON_GIT_DIR";; esac
+MAIN_WORKSPACE=$(CDPATH= cd -- "$(dirname -- "$COMMON_GIT_DIR")" && pwd)
+ROUTER_SOURCE=${ROUTER_SECRET_FILE:-$MAIN_WORKSPACE/router.txt}
+TELEGRAM_SOURCE=${TELEGRAM_SECRET_FILE:-$MAIN_WORKSPACE/tg_setting.txt}
+scan_secrets "$STAGE" "$CONTROL" "$ROUTER_SOURCE" "$TELEGRAM_SOURCE"
 
 (
     cd "$CONTROL"
-    LC_ALL=C find . -type f -print | LC_ALL=C sort | \
-        xargs tar --format ustar --uid 0 --gid 0 --numeric-owner -cf "$BUILD/control.tar"
+    if [ "$(tar_style)" = gnu ]; then
+        LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar --format=ustar --owner=0 --group=0 --numeric-owner -cf "$BUILD/control.tar"
+    else
+        LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar --format ustar --uid 0 --gid 0 --numeric-owner -cf "$BUILD/control.tar"
+    fi
 )
 (
     cd "$STAGE"
-    LC_ALL=C find . -type f -print | LC_ALL=C sort | \
-        xargs tar --format ustar --uid 0 --gid 0 --numeric-owner -cf "$BUILD/data.tar"
+    if [ "$(tar_style)" = gnu ]; then
+        LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar --format=ustar --owner=0 --group=0 --numeric-owner -cf "$BUILD/data.tar"
+    else
+        LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar --format ustar --uid 0 --gid 0 --numeric-owner -cf "$BUILD/data.tar"
+    fi
 )
 gzip -n -f "$BUILD/control.tar"
 gzip -n -f "$BUILD/data.tar"

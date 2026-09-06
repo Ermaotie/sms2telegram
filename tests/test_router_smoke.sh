@@ -42,4 +42,12 @@ accepts_identity 'AirM2M_780EPV_V1009_LTE_AT'
 rejects_identity 'Air780EPV_V1009_LTE_AT'
 rejects_identity 'AirM2M_700EPV_V1009_LTE_AT'
 
-echo "PASS router smoke HTTP status and modem identity policy"
+printf '+CPMS: ("SM","ME"),("SM"),("SM")\n' | "$ROOT/tests/router-smoke.sh" --check-cpms ||
+    fail "expected CPMS SM capability to be accepted"
+if printf '+CNMI: (0-3),(0-3),(0-3),(0-2),(0-0)\n' | "$ROOT/tests/router-smoke.sh" --check-cnmi; then
+    fail "expected incomplete CNMI range to be rejected"
+fi
+printf '+CNMI: (0-3),(0-3),(0-3),(0-2),(0-1)\n' | "$ROOT/tests/router-smoke.sh" --check-cnmi ||
+    fail "expected full CNMI range to be accepted"
+
+echo "PASS router smoke HTTP, identity, and SMS capability policy"

@@ -32,7 +32,8 @@ assert_eq "$members" "debian-binary
 control.tar.gz
 data.tar.gz" "IPK member order"
 pass "IPK member order"
-assert_eq "$(cat "$TMP/debian-binary")" "2.0" "debian-binary version"
+assert_eq "$(wc -c < "$TMP/debian-binary" | tr -d ' ')" "4" "debian-binary byte count"
+printf '2.0\n' | cmp - "$TMP/debian-binary" || fail "debian-binary bytes"
 pass "debian-binary"
 
 mkdir "$TMP/control" "$TMP/data"
@@ -89,25 +90,47 @@ pass "staged modes"
 if find "$TMP/data" -type f \( -name '*test*' -o -name 'router.txt' -o -name 'tg_setting.txt' \) | grep . >/dev/null; then
     fail "data archive contains a test or sensitive file"
 fi
-if [ -n "${ROUTER_SECRET_FILE:-}" ]; then
-    [ -f "$ROUTER_SECRET_FILE" ] || fail "ROUTER_SECRET_FILE is not a file"
-    if find "$TMP/data" -type f -exec grep -F -q -f "$ROUTER_SECRET_FILE" {} \; -print | grep -q .; then
-        fail "data archive contains configured router secret"
-    fi
-fi
+COMMON_GIT_DIR=$(git -C "$ROOT" rev-parse --git-common-dir)
+case "$COMMON_GIT_DIR" in /*) ;; *) COMMON_GIT_DIR="$ROOT/$COMMON_GIT_DIR";; esac
+MAIN_WORKSPACE=$(CDPATH= cd -- "$(dirname -- "$COMMON_GIT_DIR")" && pwd)
+ROUTER_SOURCE=${ROUTER_SECRET_FILE:-$MAIN_WORKSPACE/router.txt}
+TELEGRAM_SOURCE=${TELEGRAM_SECRET_FILE:-$MAIN_WORKSPACE/tg_setting.txt}
+sh "$ROOT/scripts/build-ipk.sh" --check-secret-scan "$TMP/data" "$TMP/control" "$ROUTER_SOURCE" "$TELEGRAM_SOURCE" ||
+    fail "archive contains configured secret"
 pass "no test or secret files"
 
+mkdir -p "$TMP/init.d" "$TMP/lifecycle"
+cat > "$TMP/init.d/sms2telegram" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >> "$ACTION_LOG"
+[ "${FAIL_ACTION:-}" != "$1" ]
+EOF
+chmod 700 "$TMP/init.d/sms2telegram"
 for script in postinst prerm; do
-    IPKG_INSTROOT="$TMP/offline-root" sh "$TMP/control/$script"
+    sed "s|/etc/init.d|$TMP/init.d|g" "$TMP/control/$script" > "$TMP/lifecycle/$script"
+    chmod 700 "$TMP/lifecycle/$script"
 done
-grep -F 'IPKG_INSTROOT' "$TMP/control/postinst" >/dev/null || fail "postinst lacks root guard"
-grep -F 'IPKG_INSTROOT' "$TMP/control/prerm" >/dev/null || fail "prerm lacks root guard"
-grep -F 'set -eu' "$TMP/control/postinst" >/dev/null || fail "postinst does not propagate failures"
-grep -F 'set -eu' "$TMP/control/prerm" >/dev/null || fail "prerm does not propagate failures"
-grep -F '/etc/init.d/sms2telegram enable' "$TMP/control/postinst" >/dev/null || fail "postinst does not enable"
-grep -F '/etc/init.d/sms2telegram restart' "$TMP/control/postinst" >/dev/null || fail "postinst does not restart"
-grep -F '/etc/init.d/sms2telegram stop' "$TMP/control/prerm" >/dev/null || fail "prerm does not stop"
-grep -F '/etc/init.d/sms2telegram disable' "$TMP/control/prerm" >/dev/null || fail "prerm does not disable"
-pass "lifecycle root guards and actions"
+ACTION_LOG="$TMP/actions" IPKG_INSTROOT="$TMP/offline-root" sh "$TMP/lifecycle/postinst"
+ACTION_LOG="$TMP/actions" IPKG_INSTROOT="$TMP/offline-root" sh "$TMP/lifecycle/prerm"
+[ ! -e "$TMP/actions" ] || fail "offline lifecycle ran an action"
+ACTION_LOG="$TMP/actions" IPKG_INSTROOT= sh "$TMP/lifecycle/postinst"
+assert_eq "$(cat "$TMP/actions")" "enable
+restart" "postinst action order"
+: > "$TMP/actions"
+ACTION_LOG="$TMP/actions" IPKG_INSTROOT= sh "$TMP/lifecycle/prerm"
+assert_eq "$(cat "$TMP/actions")" "stop
+disable" "prerm action order"
+for script in postinst prerm; do
+    first=enable second=restart
+    [ "$script" = prerm ] && { first=stop; second=disable; }
+    : > "$TMP/actions"
+    if ACTION_LOG="$TMP/actions" FAIL_ACTION="$first" IPKG_INSTROOT= sh "$TMP/lifecycle/$script"; then fail "$script swallowed first failure"; fi
+    assert_eq "$(cat "$TMP/actions")" "$first" "$script stops after first failure"
+    : > "$TMP/actions"
+    if ACTION_LOG="$TMP/actions" FAIL_ACTION="$second" IPKG_INSTROOT= sh "$TMP/lifecycle/$script"; then fail "$script swallowed second failure"; fi
+    assert_eq "$(cat "$TMP/actions")" "$first
+$second" "$script propagates second failure"
+done
+pass "lifecycle root guards, ordering, and failures"
 
 echo "PASS package archive validation"

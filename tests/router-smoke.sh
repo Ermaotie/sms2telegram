@@ -13,6 +13,9 @@ modem_identity_matches() {
     grep -Fq 'AirM2M_780EPV'
 }
 
+cpms_supports_sm() { grep -Fq 'SM'; }
+cnmi_supports_required_ranges() { grep -Fq '+CNMI: (0-3),(0-3),(0-3),(0-2),(0-1)'; }
+
 if [ "${1:-}" = "--check-http-status" ]; then
     if http_status_proves_reachability "${2:-}"; then exit 0; fi
     exit 1
@@ -21,6 +24,8 @@ if [ "${1:-}" = "--check-modem-identity" ]; then
     if modem_identity_matches; then exit 0; fi
     exit 1
 fi
+if [ "${1:-}" = "--check-cpms" ]; then if cpms_supports_sm; then exit 0; fi; exit 1; fi
+if [ "${1:-}" = "--check-cnmi" ]; then if cnmi_supports_required_ranges; then exit 0; fi; exit 1; fi
 
 STTY_BIN=${STTY_BIN:-/tmp/sms2telegram-stty/usr/bin/stty}
 TMP=${TMPDIR:-/tmp}/sms2telegram-router-smoke-$$
@@ -76,13 +81,18 @@ local client = at.Client.new(transport, core, { timeout_ms = 5000 })
 for _, command in ipairs({ "AT", "ATI", "AT+CMGF=?", "AT+CPMS=?", "AT+CNMI=?" }) do
   local frame, command_err = client:command(command)
   assert(frame, command_err)
+  if command == "AT+CPMS=?" then
+    local file = assert(io.open(arg[3] .. "/cpms.txt", "wb")); file:write(frame); file:close()
+  elseif command == "AT+CNMI=?" then
+    local file = assert(io.open(arg[3] .. "/cnmi.txt", "wb")); file:write(frame); file:close()
+  end
   io.write(frame, "\n")
 end
 transport:close()
 EOF
-lua "$TMP/probe.lua" "$TMP" "$STTY_BIN" > "$TMP/modem.txt" || fail "non-destructive modem capability probes failed"
+lua "$TMP/probe.lua" "$TMP" "$STTY_BIN" "$TMP" > "$TMP/modem.txt" || fail "non-destructive modem capability probes failed"
 modem_identity_matches < "$TMP/modem.txt" || fail "unexpected modem identity"
 grep -F '+CMGF: (0-1)' "$TMP/modem.txt" >/dev/null || fail "text SMS mode capability missing"
-grep -F 'SM' "$TMP/modem.txt" >/dev/null || fail "SIM SMS storage capability missing"
-grep -F '+CNMI:' "$TMP/modem.txt" >/dev/null || fail "CNMI capability missing"
+cpms_supports_sm < "$TMP/cpms.txt" || fail "SIM SMS storage capability missing"
+cnmi_supports_required_ranges < "$TMP/cnmi.txt" || fail "CNMI capability range missing"
 pass "AirM2M_780EPV non-destructive SMS capabilities"
