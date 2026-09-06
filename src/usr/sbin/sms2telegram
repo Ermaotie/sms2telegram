@@ -5,8 +5,13 @@ local libdir = os.getenv("SMS2TELEGRAM_LIBDIR") or "/usr/lib/sms2telegram"
 local core = dofile(libdir .. "/core.lua")
 local at = dofile(libdir .. "/at.lua")
 local delivery = dofile(libdir .. "/delivery.lua")
+local status_module = dofile(libdir .. "/status.lua")
 local worker_module = dofile(libdir .. "/worker.lua")
 local ledger_path = os.getenv("SMS2TELEGRAM_LEDGER_PATH") or "/etc/sms2telegram/delivered"
+local update_offset_path = os.getenv("SMS2TELEGRAM_UPDATE_OFFSET_PATH") or
+  "/etc/sms2telegram/telegram_update_offset"
+local service_version = "1.1.0"
+local started_at = os.time()
 
 pcall(nixio.openlog, "sms2telegram")
 
@@ -65,6 +70,74 @@ end
 local client
 local connected_device
 local connected_storage
+local last_scan = "等待首次扫描"
+local last_scan_at
+local last_scan_ok
+local status_bot
+local status_bot_id
+local status_error_logged = false
+
+local function mark_scan(message, ok)
+  last_scan = message
+  last_scan_ok = ok
+  last_scan_at = os.date("%Y-%m-%d %H:%M:%S")
+end
+
+local function ensure_status_bot(config)
+  if os.getenv("SMS2TELEGRAM_STATUS_DISABLED") == "1" then return nil end
+  local bot_offset_path, bot_id = status_module.offset_path(update_offset_path, config.bot_token)
+  if not bot_offset_path then return nil end
+  if status_bot and status_bot_id == bot_id then return status_bot end
+  local offset_store = status_module.OffsetStore.new(bot_offset_path)
+  if not offset_store then return nil end
+  status_bot = status_module.Bot.new({
+    delivery = delivery,
+    core = core,
+    route = route_output,
+    exec = delivery._run,
+    sender = delivery.Sender.new({}, { pid = nixio.getpid() }),
+    offset_store = offset_store
+  }, { pid = nixio.getpid() })
+  status_bot_id = status_bot and bot_id or nil
+  return status_bot
+end
+
+local function poll_status(config)
+  local bot = ensure_status_bot(config)
+  if not bot then return end
+  local current_route = route_output()
+  local route_device = core.route_device(current_route)
+  local device_available = nixio.fs and nixio.fs.stat and nixio.fs.stat(config.device) ~= nil
+  local ok = bot:poll(config, {
+    version = service_version,
+    uptime_seconds = os.time() - started_at,
+    modem_connected = client ~= nil,
+    device = config.device,
+    device_available = device_available,
+    route_device = route_device,
+    allowed_device = config.allowed_wan_device,
+    last_scan = last_scan,
+    last_scan_at = last_scan_at,
+    last_scan_ok = last_scan_ok
+  })
+  if ok then
+    status_error_logged = false
+  elseif not status_error_logged then
+    nixio.syslog("err", "sms2telegram status command unavailable")
+    status_error_logged = true
+  end
+end
+
+local function sleep_with_status(config, seconds)
+  local remaining = seconds
+  while remaining > 0 do
+    local step = math.min(config.poll_interval, remaining)
+    nixio.nanosleep(step)
+    remaining = remaining - step
+    poll_status(config)
+  end
+end
+
 local delay
 while true do
   local config = load_config()
@@ -75,6 +148,7 @@ while true do
     connected_storage = nil
     nixio.nanosleep((config and config.poll_interval) or 1)
   else
+    poll_status(config)
     if client and (connected_device ~= config.device or connected_storage ~= config.storage) then
       close_client(client)
       client = nil
@@ -95,18 +169,20 @@ while true do
         end
       end
       if not client then
+        mark_scan("串口连接失败", false)
         delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
         log_redacted("at", delay)
-        nixio.nanosleep(delay)
+        sleep_with_status(config, delay)
       end
     end
 
     if client then
       local ledger = delivery.Ledger.new(ledger_path)
       if not ledger then
+        mark_scan("确认记录异常", false)
         delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
         log_redacted("ledger", delay)
-        nixio.nanosleep(delay)
+        sleep_with_status(config, delay)
       else
         local instance = worker_module.new({
           core = core,
@@ -118,18 +194,25 @@ while true do
         }, config)
         local ok, category, at_failed = instance:cycle()
         if ok then
+          mark_scan("正常", true)
           delay = nil
           local waited, wait_err = client:wait_for_cmti(config.poll_interval * 1000)
           if waited == nil then
+            mark_scan("串口通信异常", false)
             close_client(client)
             client = nil
             connected_device = nil
             connected_storage = nil
             delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
             log_redacted("at", delay)
-            nixio.nanosleep(delay)
+            sleep_with_status(config, delay)
           end
         else
+          local scan_labels = {
+            at = "串口通信异常", ledger = "确认记录异常",
+            route = "网络出口异常", telegram = "Telegram 发送异常"
+          }
+          mark_scan(scan_labels[category] or "未知异常", false)
           if category == "at" or at_failed then
             close_client(client)
             client = nil
@@ -138,7 +221,7 @@ while true do
           end
           delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
           log_redacted(category, delay)
-          nixio.nanosleep(delay)
+          sleep_with_status(config, delay)
         end
       end
     end

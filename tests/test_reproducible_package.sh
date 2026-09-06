@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-PACKAGE="$ROOT/dist/sms2telegram_1.0.3_all.ipk"
+PACKAGE="$ROOT/dist/sms2telegram_1.1.0_all.ipk"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 digest() { shasum -a 256 "$PACKAGE" | awk '{print $1}'; }

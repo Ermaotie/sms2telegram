@@ -58,6 +58,8 @@ t.eq("reject shell token", delivery.validate_credentials("123;reboot", "1"), nil
 t.eq("reject invalid chat", delivery.validate_credentials("123456:Abc_def-XYZ", "-100;reboot"), nil)
 t.eq("allow exact eth0", delivery.route_allowed("1.1.1.1 dev eth0 src 192.168.1.2", "eth0", core), true)
 t.eq("deny SIM eth2", delivery.route_allowed("1.1.1.1 dev eth2 src 10.0.0.2", "eth0", core), nil)
+t.eq("never permit SIM even when configured", delivery.route_allowed(
+  "1.1.1.1 dev eth2 src 10.0.0.2", "eth2", core), nil)
 
 -- The expected canonical string is hand-written so this catches omitted
 -- delimiters and field-boundary collisions in the fingerprint implementation.

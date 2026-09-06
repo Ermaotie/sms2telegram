@@ -1,8 +1,8 @@
 Package: sms2telegram
-Version: 1.0.3
+Version: 1.1.0
 Architecture: all
 Maintainer: Local Administrator
-Depends: lua, luci-lib-nixio, coreutils-stty, curl, ca-bundle, jsonfilter
+Depends: lua, luci-lib-nixio, luci-lib-jsonc, coreutils-stty, curl, ca-bundle, jsonfilter
 Section: net
 Priority: optional
 Description: Forward stored Air780EPV SMS messages to Telegram using the router uplink.

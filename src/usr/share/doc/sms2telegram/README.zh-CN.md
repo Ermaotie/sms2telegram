@@ -7,6 +7,9 @@ OpenWrt `procd` 管理并随系统启动。
 产生异常时间戳并伴随 GSM 7-bit 位移，服务会从多个位移中选择可读度最高的正文；
 恢复成功时继续转发，并将时间标为“未知（原始短信时间异常）”。
 
+在已配置的 Bot 私聊中发送 `/status`，可查看服务版本、运行时长、模块连接、串口、
+网络出口和最近扫描状态。该命令仅响应配置中的数字 `chat_id`，不会返回 Token 或短信正文。
+
 ## 安装和配置
 
 首次使用前，请先在 Telegram 中打开 Bot 并发送 `/start`。Bot 无法主动联系一个
@@ -15,7 +18,7 @@ OpenWrt `procd` 管理并随系统启动。
 在路由器上执行：
 
 ```sh
-opkg install /tmp/sms2telegram_1.0.3_all.ipk
+opkg install /tmp/sms2telegram_1.1.0_all.ipk
 uci set sms2telegram.main.bot_token='123456:replace_with_real_token'
 uci set sms2telegram.main.chat_id='-1001234567890'
 uci commit sms2telegram

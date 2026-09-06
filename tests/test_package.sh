@@ -48,9 +48,9 @@ pass "control archive paths"
 
 control_field() { awk -F ': ' -v key="$1" '$1 == key { print substr($0, length(key) + 3); exit }' "$TMP/control/control"; }
 assert_eq "$(control_field Package)" "sms2telegram" "package name"
-assert_eq "$(control_field Version)" "1.0.3" "package version"
+assert_eq "$(control_field Version)" "1.1.0" "package version"
 assert_eq "$(control_field Architecture)" "all" "package architecture"
-assert_eq "$(control_field Depends)" "lua, luci-lib-nixio, coreutils-stty, curl, ca-bundle, jsonfilter" "package dependencies"
+assert_eq "$(control_field Depends)" "lua, luci-lib-nixio, luci-lib-jsonc, coreutils-stty, curl, ca-bundle, jsonfilter" "package dependencies"
 pass "control metadata"
 assert_eq "$(cat "$TMP/control/conffiles")" "/etc/config/sms2telegram" "conffile declaration"
 pass "conffile declaration"
@@ -60,6 +60,7 @@ etc/init.d/sms2telegram
 usr/lib/sms2telegram/at.lua
 usr/lib/sms2telegram/core.lua
 usr/lib/sms2telegram/delivery.lua
+usr/lib/sms2telegram/status.lua
 usr/lib/sms2telegram/worker.lua
 usr/sbin/sms2telegram
 usr/share/doc/sms2telegram/README.zh-CN.md'
@@ -93,6 +94,7 @@ for path in \
     usr/lib/sms2telegram/at.lua \
     usr/lib/sms2telegram/core.lua \
     usr/lib/sms2telegram/delivery.lua \
+    usr/lib/sms2telegram/status.lua \
     usr/lib/sms2telegram/worker.lua \
     usr/sbin/sms2telegram \
     usr/share/doc/sms2telegram/README.zh-CN.md; do

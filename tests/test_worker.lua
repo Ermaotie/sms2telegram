@@ -228,6 +228,7 @@ local function copy_runtime(temp)
   assert(shell_status("mkdir -p " .. quote(temp .. "/lib") .. " " .. quote(temp .. "/bin")) == 0)
   assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/core.lua") .. " " .. quote(temp .. "/lib/core.lua")) == 0)
   assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/delivery.lua") .. " " .. quote(temp .. "/lib/delivery.lua")) == 0)
+  assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/status.lua") .. " " .. quote(temp .. "/lib/status.lua")) == 0)
   assert(shell_status("cp " .. quote(root .. "/usr/lib/sms2telegram/worker.lua") .. " " .. quote(temp .. "/lib/worker.lua")) == 0)
 end
 
@@ -249,7 +250,8 @@ case "$key" in
   sms2telegram.main.bot_token) [ "$SMS2TELEGRAM_MISSING" = bot_token ] || printf '123456:Abc_def-XYZ\n' ;;
   sms2telegram.main.chat_id) [ "$SMS2TELEGRAM_MISSING" = chat_id ] || printf '%s\n' '-1001234567890' ;;
   sms2telegram.main.allowed_wan_device) printf 'eth0\n' ;;
-  sms2telegram.main.poll_interval|sms2telegram.main.retry_initial|sms2telegram.main.retry_max) printf '1\n' ;;
+  sms2telegram.main.poll_interval) printf '%s\n' "${SMS2TELEGRAM_TEST_POLL_INTERVAL:-1}" ;;
+  sms2telegram.main.retry_initial|sms2telegram.main.retry_max) printf '%s\n' "${SMS2TELEGRAM_TEST_RETRY:-1}" ;;
 esac
 ]])
   assert(shell_status("chmod 700 " .. quote(temp .. "/bin/uci")) == 0)
@@ -257,7 +259,8 @@ end
 
 local function run_daemon(temp, extra, seconds)
   local process_command = "PATH=" .. quote(temp .. "/bin") .. ":$PATH " ..
-    "SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") .. " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/state/delivered") .. " " .. extra .. " " ..
+    "SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") .. " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/state/delivered") ..
+    " SMS2TELEGRAM_STATUS_DISABLED=1 " .. extra .. " " ..
     quote(root .. "/usr/sbin/sms2telegram") ..
     " >/dev/null 2>&1 & child=$!; sleep " .. tostring(seconds or 2) .. "; kill -0 $child; alive=$?; kill $child 2>/dev/null; wait $child 2>/dev/null; exit $alive"
   return shell_status("sh -c " .. quote(process_command))
@@ -379,9 +382,13 @@ return M
   local at_log, state = temp .. "/at.log", temp .. "/changed"
   local extra = "SMS2TELEGRAM_AT_LOG=" .. quote(at_log) .. " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/delivered") ..
     " SMS2TELEGRAM_UCI_STATE=" .. quote(state)
-  local process_command = "PATH=" .. quote(temp .. "/bin") .. ":$PATH SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") .. " " .. extra .. " " ..
+  local process_command = "PATH=" .. quote(temp .. "/bin") .. ":$PATH SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") ..
+    " SMS2TELEGRAM_STATUS_DISABLED=1 " .. extra .. " " ..
     quote(root .. "/usr/sbin/sms2telegram") ..
-    " >/dev/null 2>&1 & child=$!; sleep 1; : > " .. quote(state) .. "; sleep 2; kill -0 $child; alive=$?; kill $child 2>/dev/null; wait $child 2>/dev/null; exit $alive"
+    " >/dev/null 2>&1 & child=$!; sleep 1; : > " .. quote(state) ..
+    "; attempt=0; while ! grep -q 'init:ME' " .. quote(at_log) ..
+    " 2>/dev/null && [ $attempt -lt 6 ]; do sleep 1; attempt=$((attempt + 1)); done" ..
+    "; kill -0 $child; alive=$?; kill $child 2>/dev/null; wait $child 2>/dev/null; exit $alive"
   t.eq("hot-reload daemon stays alive", shell_status("sh -c " .. quote(process_command)), 0)
   t.eq("hot-reload reopens changed device and storage", read_file(at_log),
     "open:/dev/first\ninit:SM\nclose\nopen:/dev/second\ninit:ME\n")
@@ -423,6 +430,40 @@ return M
   t.eq("AT reconnect daemon stays alive", run_daemon(temp, extra, 3), 0)
   t.eq("AT reconnect closes and rebuilds after Telegram primary error", read_file(at_log),
     "open\ninit\nclose\nopen\ninit\n")
+  shell_status("rm -rf " .. quote(temp))
+end
+
+-- A status request must still be processed while the modem is unavailable.
+do
+  local temp = process_temp()
+  copy_runtime(temp)
+  install_uci(temp)
+  write_file(temp .. "/lib/at.lua", [[local M = { Client = {} }
+function M.open_nixio_transport() return nil, "modem unavailable" end
+return M
+]])
+  write_file(temp .. "/lib/status.lua", [[local M = { OffsetStore = {}, Bot = {} }
+function M.offset_path(path) return path .. ".123456", "123456" end
+function M.OffsetStore.new() return {} end
+function M.Bot.new()
+  return { poll = function(_, _, snapshot)
+    local file = assert(io.open(os.getenv("SMS2TELEGRAM_STATUS_LOG"), "ab"))
+    file:write("poll:" .. tostring(snapshot.modem_connected) .. "\n")
+    file:close()
+    return true
+  end }
+end
+return M
+]])
+  local status_log = temp .. "/status.log"
+  local extra = "SMS2TELEGRAM_STATUS_LOG=" .. quote(status_log) ..
+    " SMS2TELEGRAM_STATUS_DISABLED=0" ..
+    " SMS2TELEGRAM_TEST_POLL_INTERVAL=1 SMS2TELEGRAM_TEST_RETRY=30" ..
+    " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/state/delivered") ..
+    " SMS2TELEGRAM_UPDATE_OFFSET_PATH=" .. quote(temp .. "/state/update_offset")
+  t.eq("daemon with unavailable modem stays alive", run_daemon(temp, extra, 3), 0)
+  local _, status_poll_count = read_file(status_log):gsub("poll:false", "")
+  t.truthy("status polling continues during long modem backoff", status_poll_count >= 2)
   shell_status("rm -rf " .. quote(temp))
 end
 

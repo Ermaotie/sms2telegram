@@ -164,6 +164,7 @@ function M.route_allowed(route_output, allowed_device, core)
       type(core.route_device) ~= "function" then
     return nil, "invalid route check"
   end
+  if allowed_device ~= "eth0" then return nil, "only eth0 is permitted" end
   if core.route_device(route_output) ~= allowed_device then
     return nil, "default route is not on the allowed device"
   end
