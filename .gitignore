@@ -6,3 +6,4 @@ dist/*.ipk
 dist/*.sha256
 .worktrees/
 .superpowers/
+docs/superpowers/

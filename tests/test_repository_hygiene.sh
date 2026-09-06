@@ -8,4 +8,9 @@ if ! git -C "$ROOT" check-ignore -q tg_setting.txt; then
     exit 1
 fi
 
-echo "PASS Telegram credential source is ignored by Git"
+if ! git -C "$ROOT" check-ignore -q docs/superpowers/.future-private.md; then
+    echo "FAIL: docs/superpowers must remain private and ignored" >&2
+    exit 1
+fi
+
+echo "PASS private credential and development-document paths are ignored by Git"
