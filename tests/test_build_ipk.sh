@@ -32,6 +32,7 @@ sh "$ROOT/scripts/build-ipk.sh" --check-secret-scan "$TMP/stage" "$TMP/control" 
 
 mkdir -p "$TMP/export" "$TMP/bin"
 cp -R "$ROOT/src" "$ROOT/ipk" "$ROOT/scripts" "$TMP/export/"
+printf 'must not be packaged\n' > "$TMP/export/src/untracked-build-junk"
 cat > "$TMP/bin/git" <<'EOF'
 #!/bin/sh
 exit 127

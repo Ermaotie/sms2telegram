@@ -79,7 +79,18 @@ create_portable_ar() {
 
 rm -rf "$BUILD"
 mkdir -p "$STAGE" "$CONTROL" "$REPO/dist"
-cp -R "$REPO/src/." "$STAGE/"
+for path in \
+    etc/config/sms2telegram \
+    etc/init.d/sms2telegram \
+    usr/lib/sms2telegram/at.lua \
+    usr/lib/sms2telegram/core.lua \
+    usr/lib/sms2telegram/delivery.lua \
+    usr/lib/sms2telegram/worker.lua \
+    usr/sbin/sms2telegram \
+    usr/share/doc/sms2telegram/README.zh-CN.md; do
+    mkdir -p "$STAGE/$(dirname -- "$path")"
+    cp "$REPO/src/$path" "$STAGE/$path"
+done
 mkdir -p "$STAGE/etc/sms2telegram"
 chmod 0700 "$STAGE/etc/sms2telegram"
 cp "$REPO/ipk/control/control" "$REPO/ipk/control/conffiles" \
