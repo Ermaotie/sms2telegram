@@ -5,7 +5,7 @@ REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD="$REPO/build/ipk"
 STAGE="$BUILD/data"
 CONTROL="$BUILD/control"
-PACKAGE=sms2telegram_1.0.0_all.ipk
+PACKAGE=sms2telegram_1.0.1_all.ipk
 
 tar_flags_for() {
     case "$1" in
@@ -63,20 +63,6 @@ if [ "${1:-}" = "--check-secret-scan" ]; then
     exit $?
 fi
 
-create_portable_ar() {
-    output=$1
-    shift
-    {
-        printf '!<arch>\n'
-        for member in "$@"; do
-            size=$(wc -c < "$member" | tr -d ' ')
-            printf '%-16s%-12s%-6s%-6s%-8s%-10s`\n' "$member" 0 0 0 100644 "$size"
-            cat "$member"
-            [ $((size % 2)) -eq 0 ] || printf '\n'
-        done
-    } > "$output"
-}
-
 rm -rf "$BUILD"
 mkdir -p "$STAGE" "$CONTROL" "$REPO/dist"
 for path in \
@@ -104,7 +90,7 @@ chmod 0755 "$STAGE/etc/init.d/sms2telegram" "$STAGE/usr/sbin/sms2telegram" \
 # 1980 avoids a negative local timestamp on UTC+ timezones, which ustar cannot
 # encode (unlike the Unix epoch at local midnight).
 find "$STAGE" "$CONTROL" -type f -exec touch -t 198001010000 {} +
-touch -t 198001010000 "$STAGE/etc/sms2telegram"
+find "$STAGE" -type d -exec touch -t 198001010000 {} +
 
 if find "$STAGE" "$CONTROL" -type f -size 0 -print | grep -q .; then
     echo "refusing to package an empty source file" >&2
@@ -139,20 +125,19 @@ scan_secrets "$STAGE" "$CONTROL" "$ROUTER_SOURCE" "$TELEGRAM_SOURCE"
 (
     cd "$STAGE"
     set -- $(tar_flags_for "$(tar_style)")
-    LC_ALL=C find . \( -type f -o -path './etc/sms2telegram' \) -print | LC_ALL=C sort | xargs tar "$@" -cf "$BUILD/data.tar"
+    LC_ALL=C find . ! -path . \( -type d -o -type f \) -print | LC_ALL=C sort |
+        xargs tar --no-recursion "$@" -cf "$BUILD/data.tar"
 )
 gzip -n -f "$BUILD/control.tar"
 gzip -n -f "$BUILD/data.tar"
 printf '2.0\n' > "$BUILD/debian-binary"
+touch -t 198001010000 "$BUILD/debian-binary" "$BUILD/control.tar.gz" "$BUILD/data.tar.gz"
 (
     cd "$BUILD"
-    # macOS ar adds a Mach-O symbol-table member even for data archives.  Use
-    # the standard ar wire format there so opkg sees exactly three members.
-    if [ "$(uname -s)" = Darwin ]; then
-        create_portable_ar "$REPO/dist/$PACKAGE" debian-binary control.tar.gz data.tar.gz
-    else
-        ar rcs "$REPO/dist/$PACKAGE" debian-binary control.tar.gz data.tar.gz
-    fi
+    set -- $(tar_flags_for "$(tar_style)")
+    tar "$@" -cf package.tar ./debian-binary ./data.tar.gz ./control.tar.gz
+    gzip -n -f package.tar
+    mv package.tar.gz "$REPO/dist/$PACKAGE"
 )
 (
     cd "$REPO"

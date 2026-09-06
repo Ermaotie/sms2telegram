@@ -5,10 +5,13 @@ OpenWrt `procd` 管理并随系统启动。
 
 ## 安装和配置
 
+首次使用前，请先在 Telegram 中打开 Bot 并发送 `/start`。Bot 无法主动联系一个
+从未开始过会话的用户；此时 Telegram 会返回 `chat not found`。
+
 在路由器上执行：
 
 ```sh
-opkg install /tmp/sms2telegram_1.0.0_all.ipk
+opkg install /tmp/sms2telegram_1.0.1_all.ipk
 uci set sms2telegram.main.bot_token='123456:replace_with_real_token'
 uci set sms2telegram.main.chat_id='-1001234567890'
 uci commit sms2telegram

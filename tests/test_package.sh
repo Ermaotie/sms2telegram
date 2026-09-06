@@ -22,16 +22,14 @@ mode_of() {
 [ -f "$PACKAGE" ] || fail "IPK is absent: $PACKAGE"
 case "$PACKAGE" in /*) ;; *) PACKAGE=$(CDPATH= cd -- "$(dirname -- "$PACKAGE")" && pwd)/$(basename -- "$PACKAGE");; esac
 
-(
-    cd "$TMP"
-    ar x "$PACKAGE"
-)
-
-members=$(ar t "$PACKAGE")
-assert_eq "$members" "debian-binary
-control.tar.gz
-data.tar.gz" "IPK member order"
-pass "IPK member order"
+magic=$(od -An -tx1 -N2 "$PACKAGE" | tr -d ' \n')
+assert_eq "$magic" "1f8b" "IPK outer gzip magic"
+members=$(tar -tzf "$PACKAGE")
+assert_eq "$members" "./debian-binary
+./data.tar.gz
+./control.tar.gz" "target-compatible IPK member order"
+tar -xzf "$PACKAGE" -C "$TMP"
+pass "target-compatible gzip/tar IPK outer archive"
 assert_eq "$(wc -c < "$TMP/debian-binary" | tr -d ' ')" "4" "debian-binary byte count"
 printf '2.0\n' | cmp - "$TMP/debian-binary" || fail "debian-binary bytes"
 pass "debian-binary"
@@ -50,7 +48,7 @@ pass "control archive paths"
 
 control_field() { awk -F ': ' -v key="$1" '$1 == key { print substr($0, length(key) + 3); exit }' "$TMP/control/control"; }
 assert_eq "$(control_field Package)" "sms2telegram" "package name"
-assert_eq "$(control_field Version)" "1.0.0" "package version"
+assert_eq "$(control_field Version)" "1.0.1" "package version"
 assert_eq "$(control_field Architecture)" "all" "package architecture"
 assert_eq "$(control_field Depends)" "lua, luci-lib-nixio, coreutils-stty, curl, ca-bundle, jsonfilter" "package dependencies"
 pass "control metadata"
@@ -68,6 +66,22 @@ usr/share/doc/sms2telegram/README.zh-CN.md'
 actual_data=$(tar -tzf "$TMP/data.tar.gz" | sed -e 's#^\./##' -e '/\/$/d')
 assert_eq "$actual_data" "$expected_data" "data archive paths"
 pass "data archive paths"
+for directory in \
+    ./etc/ \
+    ./etc/config/ \
+    ./etc/init.d/ \
+    ./etc/sms2telegram/ \
+    ./usr/ \
+    ./usr/lib/ \
+    ./usr/lib/sms2telegram/ \
+    ./usr/sbin/ \
+    ./usr/share/ \
+    ./usr/share/doc/ \
+    ./usr/share/doc/sms2telegram/; do
+    tar -tzf "$TMP/data.tar.gz" | grep -F -x "$directory" >/dev/null ||
+        fail "data archive omits directory entry $directory"
+done
+pass "data archive directory entries"
 [ -d "$TMP/data/etc/sms2telegram" ] || fail "missing persistent ledger directory"
 assert_eq "$(mode_of "$TMP/data/etc/sms2telegram")" "700" "persistent ledger directory mode"
 [ ! -e "$TMP/data/etc/sms2telegram/delivered" ] || fail "runtime ledger must not be packaged"

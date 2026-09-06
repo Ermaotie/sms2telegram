@@ -29,19 +29,19 @@
 
 从 [Releases](https://github.com/Ermaotie/sms2telegram/releases) 下载：
 
-- `sms2telegram_1.0.0_all.ipk`
-- `sms2telegram_1.0.0_all.ipk.sha256`
+- `sms2telegram_1.0.1_all.ipk`
+- `sms2telegram_1.0.1_all.ipk.sha256`
 
 可在电脑上校验文件：
 
 ```sh
-shasum -a 256 -c sms2telegram_1.0.0_all.ipk.sha256
+shasum -a 256 -c sms2telegram_1.0.1_all.ipk.sha256
 ```
 
 Linux/OpenWrt 也可使用：
 
 ```sh
-sha256sum -c sms2telegram_1.0.0_all.ipk.sha256
+sha256sum -c sms2telegram_1.0.1_all.ipk.sha256
 ```
 
 ## 安装
@@ -49,7 +49,7 @@ sha256sum -c sms2telegram_1.0.0_all.ipk.sha256
 先把 IPK 上传到路由器 `/tmp`，然后执行：
 
 ```sh
-opkg install /tmp/sms2telegram_1.0.0_all.ipk
+opkg install /tmp/sms2telegram_1.0.1_all.ipk
 ```
 
 软件包会安装以下依赖：
@@ -62,6 +62,8 @@ opkg install /tmp/sms2telegram_1.0.0_all.ipk
 - `jsonfilter`
 
 ## 配置 Telegram Bot
+
+首次使用前，请先在 Telegram 中打开你的 Bot 并发送 `/start`。Bot 无法主动联系一个从未开始过会话的用户；此时 Telegram 会返回 `chat not found`。
 
 将示例中的 Token 和 Chat ID 替换为真实值：
 
