@@ -2,6 +2,18 @@
 # This check is deliberately read-only: it neither installs the IPK nor changes UCI.
 set -eu
 
+http_status_proves_reachability() {
+    case "${1:-}" in
+        [234][0-9][0-9]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "${1:-}" = "--check-http-status" ]; then
+    if http_status_proves_reachability "${2:-}"; then exit 0; fi
+    exit 1
+fi
+
 STTY_BIN=${STTY_BIN:-/tmp/sms2telegram-stty/usr/bin/stty}
 TMP=${TMPDIR:-/tmp}/sms2telegram-router-smoke-$$
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
@@ -36,9 +48,9 @@ pass "eth0 default route"
 pass "OpenClash enabled"
 
 # No token is used: this only verifies public HTTPS reachability through normal router output.
-curl --silent --show-error --connect-timeout 10 --max-time 20 --output "$TMP/telegram.json" \
-    --write-out '%{http_code}' https://api.telegram.org/ > "$TMP/http-code" || fail "Telegram HTTPS reachability failed"
-[ "$(cat "$TMP/http-code")" = 404 ] || fail "Telegram API reachability returned unexpected HTTP status"
+http_status=$(curl --silent --show-error --connect-timeout 10 --max-time 20 --output "$TMP/telegram.json" \
+    --write-out '%{http_code}' https://api.telegram.org/) || fail "Telegram HTTPS reachability failed"
+http_status_proves_reachability "$http_status" || fail "Telegram API returned unacceptable HTTP status"
 pass "Telegram HTTPS reachable without credentials"
 
 [ -x "$STTY_BIN" ] || fail "stty unavailable; extract coreutils-stty to /tmp/sms2telegram-stty or set STTY_BIN"

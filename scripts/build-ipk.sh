@@ -30,6 +30,11 @@ cp "$REPO/ipk/control/control" "$REPO/ipk/control/conffiles" \
 chmod 0600 "$STAGE/etc/config/sms2telegram"
 chmod 0755 "$STAGE/etc/init.d/sms2telegram" "$STAGE/usr/sbin/sms2telegram" \
     "$CONTROL/postinst" "$CONTROL/prerm"
+# cp(1) on macOS assigns the current time to staged files.  Normalize it so
+# tar headers and the resulting gzip streams remain reproducible across time.
+# 1980 avoids a negative local timestamp on UTC+ timezones, which ustar cannot
+# encode (unlike the Unix epoch at local midnight).
+find "$STAGE" "$CONTROL" -type f -exec touch -t 198001010000 {} +
 
 if find "$STAGE" "$CONTROL" -type f -size 0 -print | grep -q .; then
     echo "refusing to package an empty source file" >&2
