@@ -32,6 +32,7 @@
 - `src/usr/sbin/sms2telegram`: production dependency wiring and long-running loop.
 - `src/etc/init.d/sms2telegram`: `procd` lifecycle and respawn.
 - `src/etc/config/sms2telegram`: root-only UCI defaults.
+- `/etc/sms2telegram/`: persistent empty directory created by IPK staging at `0700`; runtime ledger `delivered` is not shipped or a conffile.
 - `src/usr/share/doc/sms2telegram/README.zh-CN.md`: Chinese operator guide.
 - `ipk/control/*`: package metadata, conffile declaration and lifecycle scripts.
 - `scripts/build-ipk.sh`: reproducible IPK assembly.
@@ -168,6 +169,7 @@ git commit -m "feat: add SMS Unicode primitives"
 **Interfaces:**
 - Consumes: Task 1 Unicode primitives.
 - Produces: `core.parse_cmgl(response) -> messages|nil,error`, each message containing `index`, `status`, `sender`, `timestamp`, `body`.
+- Produces: `core.cmgl_record_type(header) -> kind,fields|nil,error`, shared with serial framing so outgoing and bodyless STATUS-REPORT records are never classified as SMS-DELIVER.
 - Produces: `core.format_parts(message, limit) -> string[]`.
 - Produces: `core.route_device(route_output) -> string|nil`.
 - Produces: `core.next_backoff(current, initial, maximum) -> integer`.
@@ -223,6 +225,8 @@ messages[#messages + 1] = {
 ```
 
 Malformed headers, invalid UCS2, and missing terminal status return `nil,error`; they must never yield a partially deliverable record.
+
+Only REC READ/UNREAD records with the SMS-DELIVER sender/timestamp layout are emitted. STO records and STATUS-REPORT's FO/MR/recipient/two-timestamp layout are skipped. DELIVER requires a real body line, including an explicit blank line; bodyless STATUS-REPORT is allowed. Serial framing preserves strict UCS2 validation and uses the same header classifier.
 
 - [ ] **Step 4: Implement formatting, splitting, route parsing and backoff**
 
@@ -292,6 +296,8 @@ Initialization must execute the exact seven-command sequence from the test and s
 
 Validate the device as an absolute `/dev/tty...` path and baud as an integer. Run the fixed terminal setup `stty -F <validated-device> 115200 raw -echo`, require its exit status to be zero, open with `nixio.open(device, "r+")`, and use `nixio.poll` with `in`, `err`, and `hup` flags. Buffer arbitrary read chunks, normalize CRLF only when returning a completed frame, and preserve unsolicited `+CMTI` lines for `wait_for_cmti`.
 
+Serial writes consume nixio's three return values: `written, errno, message`. Linux errno 11 covers EAGAIN/EWOULDBLOCK and retries under the original command deadline. Partial writes resume from the remaining bytes; other failures return the third-value diagnostic as an AT failure for reconnect.
+
 The real transport surface consumed by `Client` is:
 
 ```lua
@@ -324,7 +330,7 @@ git commit -m "feat: add bounded Air780EPV AT client"
 - Consumes: `core.route_device`, `core.format_parts`.
 - Produces: `delivery.validate_credentials(token, chat_id) -> true|nil,error`.
 - Produces: `delivery.route_allowed(route_output, allowed_device, core) -> true|nil,error`.
-- Produces: `delivery.fingerprint(message, sha256_fn) -> hex_digest`.
+- Produces: `delivery.fingerprint(message, sha256_fn, storage) -> hex_digest`; storage is the configured SM/ME domain.
 - Produces: `delivery.Ledger.new(path, fs) -> ledger` with `contains`, `add`, `remove`, `save_atomic`.
 - Produces: `delivery.Sender.new(adapters, options) -> sender` with `send_parts(token, chat_id, parts) -> true|nil,error`.
 
@@ -355,6 +361,7 @@ Construct fingerprint input with explicit length delimiters to prevent field-bou
 
 ```lua
 local canonical = table.concat({
+  tostring(#storage), storage,
   tostring(message.index),
   tostring(#message.sender), message.sender,
   tostring(#message.timestamp), message.timestamp,
@@ -367,6 +374,8 @@ Write `canonical` to a protected temporary file, call `sha256sum`, validate a 64
 - [ ] **Step 4: Implement atomic ledger persistence**
 
 Split each ledger line on its single tab, require the index to match `^[1-9][0-9]*$`, require the digest to match `^[0-9a-f]+$`, and then require the digest length to equal 64; reject a corrupt ledger rather than silently discarding records. Write sorted `<index>\t<sha256>\n` records to `<path>.tmp`, chmod `0600`, flush and close, then atomically rename over `<path>`.
+
+The production filesystem first prepares and verifies the parent directory at mode `0700`. Tests use real isolated temporary parents, including first-start creation and failed preparation. Process tests send through fake curl, fail deletion, restart against the same disk ledger, and verify deletion without a second send.
 
 - [ ] **Step 5: Implement curl delivery without body interpolation**
 
@@ -436,13 +445,13 @@ Run `lua tests/test_worker.lua src`. Expected: nonzero exit because `worker.lua`
 
 - [ ] **Step 3: Implement one deterministic worker cycle**
 
-`cycle` validates credentials first, scans all modem messages, computes each fingerprint, checks ledger recovery, checks the route immediately before each new send, sends every formatted part, records confirmation atomically, then deletes and clears the ledger. Return categorized errors (`config`, `route`, `telegram`, `at`, `ledger`) without including token, Chat ID, sender or body.
+`cycle` validates credentials first, scans incoming modem messages, computes each fingerprint including configured storage, checks ledger recovery, then checks the route immediately before sending each individual formatted part. Only complete success records confirmation atomically, deletes the SMS and clears the ledger. Return categorized errors (`config`, `route`, `telegram`, `at`, `ledger`) without including token, Chat ID, sender or body. If part 2 is blocked or fails, part 1 may be resent on a later at-least-once retry.
 
 Do not let a Telegram failure delete or mark the SMS. Continue only with ledger-confirmed cleanup records; otherwise finish the cycle so backoff applies globally and avoids hammering Telegram.
 
 - [ ] **Step 4: Implement production configuration and loop wiring**
 
-The executable reads fixed keys with `uci -q get sms2telegram.main.<key>`, validates numeric intervals as `1..3600`, opens the ledger at `/var/lib/sms2telegram/delivered`, opens the real AT transport, initializes it, and runs cycles.
+The executable reads fixed keys with `uci -q get sms2telegram.main.<key>`, validates numeric intervals as `1..3600`, opens the ledger at `/etc/sms2telegram/delivered`, opens the real AT transport, initializes it, and runs cycles. Before a worker can run, ledger opening creates a missing parent, rejects non-directories/symlinks, heals its mode to `0700`, and verifies the result. Failure is category `ledger`. All daemon tests explicitly isolate their ledger path beneath `/tmp`.
 
 Loop behavior:
 
@@ -599,6 +608,7 @@ git commit -m "feat: add OpenWrt service and operator guide"
 - conffiles contains only `/etc/config/sms2telegram`;
 - data archive contains every file in the File Map and no test or secret files;
 - modes are `0755` for daemon/init/control scripts and `0600` for config;
+- the data archive also stages an empty `/etc/sms2telegram/` directory at `0700`, without a `delivered` runtime file or ledger conffile;
 - postinst enables and restarts only when `IPKG_INSTROOT` is empty;
 - prerm stops and disables only when `IPKG_INSTROOT` is empty;
 - extracting the IPK does not contain the values from `router.txt`.

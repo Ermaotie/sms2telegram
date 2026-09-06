@@ -15,14 +15,17 @@ local function fixture(options)
   local messages = options.messages or { message(7) }
   local deps = {
     core = {
-      format_parts = function(item) return { item.body } end
+      format_parts = function(item) return options.parts or { item.body } end
     },
     delivery = {
       validate_credentials = function(token, chat_id)
         if token == "token" and chat_id == "chat" then return true end
         return nil, "invalid credentials"
       end,
-      fingerprint = function(item) return item.body == "changed" and digest_b or digest_a end,
+      fingerprint = function(item, _, storage)
+        if options.capture_storage then options.capture_storage(storage) end
+        return item.body == "changed" and digest_b or digest_a
+      end,
       route_allowed = function(output, allowed)
         if output == allowed then return true end
         return nil, "route blocked"
@@ -66,6 +69,7 @@ local function fixture(options)
     },
     route = function()
       events[#events + 1] = "route"
+      if options.routes then return table.remove(options.routes, 1) end
       return options.route or "eth0"
     end
   }
@@ -105,6 +109,31 @@ local success_ok, success_err, events = cycle()
 t.eq("successful delivery result", success_ok, true)
 t.eq("successful delivery error", success_err, nil)
 t.eq("delivery order", table.concat(events, ","),
+  "scan,route,send,ledger-add,ledger-save,delete,ledger-remove,ledger-save")
+
+local multipart_ok, multipart_err, multipart_events, multipart_records = cycle({
+  parts = { "first", "second" }, routes = { "eth0", "eth2" }
+})
+t.eq("multipart changed route retains SMS", multipart_ok, nil)
+t.eq("multipart changed route error category", multipart_err, "route")
+t.eq("multipart checks each send and stops on eth2", table.concat(multipart_events, ","), "scan,route,send,route")
+t.eq("multipart route failure persists no confirmation", multipart_records["7"], nil)
+local observed_storage
+cycle({ capture_storage = function(value) observed_storage = value end }, {
+  bot_token = "token", chat_id = "chat", allowed_wan_device = "eth0", storage = "ME"
+})
+t.eq("worker fingerprints configured storage", observed_storage, "ME")
+
+local real_core = dofile(root .. "/usr/lib/sms2telegram/core.lua")
+local incoming_only = assert(real_core.parse_cmgl(table.concat({
+  '+CMGL: 1,"STO UNSENT","+8613800000000",', '0061',
+  '+CMGL: 2,"STO SENT","+8613800000000",', '0062',
+  '+CMGL: 3,"REC READ",6,42,"+8613800000000",145,"26/09/05,14:30:00+32","26/09/05,14:31:00+32",0',
+  '+CMGL: 4,"REC UNREAD","+8613800000000",,"26/09/05,14:32:00+32"', '004F004B', 'OK', ''
+}, '\r\n')))
+local incoming_ok, _, incoming_events = cycle({ messages = incoming_only })
+t.eq("mixed records deliver successfully", incoming_ok, true)
+t.eq("outgoing and report have no worker send or delete", table.concat(incoming_events, ","),
   "scan,route,send,ledger-add,ledger-save,delete,ledger-remove,ledger-save")
 
 -- Removing a confirmation after a failed delete would cause a duplicate send.
@@ -228,7 +257,7 @@ end
 
 local function run_daemon(temp, extra, seconds)
   local process_command = "PATH=" .. quote(temp .. "/bin") .. ":$PATH " ..
-    "SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") .. " " .. extra .. " " ..
+    "SMS2TELEGRAM_LIBDIR=" .. quote(temp .. "/lib") .. " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/state/delivered") .. " " .. extra .. " " ..
     quote(root .. "/usr/sbin/sms2telegram") ..
     " >/dev/null 2>&1 & child=$!; sleep " .. tostring(seconds or 2) .. "; kill -0 $child; alive=$?; kill $child 2>/dev/null; wait $child 2>/dev/null; exit $alive"
   return shell_status("sh -c " .. quote(process_command))
@@ -279,7 +308,11 @@ function M.Client.new(transport)
       if not stored then return {} end
       return { { index = 7, sender = "+8613800000000", timestamp = "26/09/05,14:30:00+32", body = "test" } }
     end,
-    delete = function() stored = false; append("delete"); return true end,
+    delete = function()
+      append("delete")
+      if os.getenv("SMS2TELEGRAM_DELETE_FAILS") == "1" then return nil, "delete failed" end
+      stored = false; return true
+    end,
     wait_for_cmti = function() require("nixio").nanosleep(1); return false end
   }
 end
@@ -298,10 +331,23 @@ printf 200
   assert(shell_status("chmod 700 " .. quote(temp .. "/bin/ip") .. " " .. quote(temp .. "/bin/curl") .. " " .. quote(temp .. "/bin/jsonfilter")) == 0)
   local at_log, send_log = temp .. "/at.log", temp .. "/send.log"
   local extra = "SMS2TELEGRAM_AT_LOG=" .. quote(at_log) .. " SMS2TELEGRAM_SEND_LOG=" .. quote(send_log) ..
-    " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/delivered")
-  t.eq("production sender process stays alive", run_daemon(temp, extra), 0)
+    " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/state/delivered")
+  t.eq("first-start sender stays alive after delete failure", run_daemon(temp, extra .. " SMS2TELEGRAM_DELETE_FAILS=1"), 0)
   t.eq("production Sender reaches fake curl", read_file(send_log), "send\n")
   t.eq("production Sender deletes after fake success", tostring(read_file(at_log):find("delete\n", 1, true) ~= nil), "true")
+  t.truthy("confirmed delete failure survives on disk", read_file(temp .. "/state/delivered"):match("^7\t"))
+  write_file(at_log, "")
+  t.eq("restarted daemon stays alive", run_daemon(temp, extra), 0)
+  t.eq("restart recovers without another send", read_file(send_log), "send\n")
+  t.truthy("restart retries only deletion", read_file(at_log):find("delete\n", 1, true))
+  t.eq("restart clears persisted confirmation after deletion", read_file(temp .. "/state/delivered"), "")
+  write_file(temp .. "/blocked-parent", "file")
+  write_file(send_log, "")
+  write_file(at_log, "")
+  t.eq("unusable ledger parent keeps daemon alive", run_daemon(temp,
+    extra .. " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/blocked-parent/delivered")), 0)
+  t.eq("unusable ledger parent prevents send", read_file(send_log), "")
+  t.eq("unusable ledger parent prevents delete", read_file(at_log):find("delete\n", 1, true), nil)
   shell_status("rm -rf " .. quote(temp))
 end
 

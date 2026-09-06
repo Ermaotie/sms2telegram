@@ -37,6 +37,10 @@ The output package is named `sms2telegram_1.0.0_all.ipk` and contains:
 
 - `/usr/sbin/sms2telegram`: long-running Lua daemon and orchestration loop
 - `/usr/lib/sms2telegram/core.lua`: pure parsing, UCS2 conversion, message formatting, route-result parsing, and retry calculations
+- `/usr/lib/sms2telegram/at.lua`: bounded serial transport and modem commands
+- `/usr/lib/sms2telegram/delivery.lua`: Telegram requests, storage-scoped fingerprints, and atomic confirmation ledger
+- `/usr/lib/sms2telegram/worker.lua`: per-part route checks, delivery and delete ordering
+- `/etc/sms2telegram/`: empty persistent state directory, staged mode `0700`; the runtime `delivered` file is neither shipped nor declared as a conffile
 - `/etc/init.d/sms2telegram`: `procd` service definition with automatic respawn
 - `/etc/config/sms2telegram`: UCI-style configuration owned and readable only by `root`
 - `/usr/share/doc/sms2telegram/README.zh-CN.md`: Chinese installation, configuration, operation, and troubleshooting guide
@@ -83,7 +87,7 @@ After valid Telegram configuration is available, the daemon opens `/dev/ttyACM0`
 
 The daemon keeps the AT port open. A `+CMTI` event triggers an immediate scan, while a 15-second periodic scan recovers notifications missed during reboot, modem reconnect, or daemon failure.
 
-Each scan uses `AT+CMGL="ALL"`, not only `REC UNREAD`. Listing a message may change its state from unread to read; scanning all messages therefore ensures failed deliveries remain eligible for retry. Each `+CMGL` record is parsed into storage index, status, sender, modem timestamp, and multiline body. UCS2 hexadecimal values are converted to UTF-8. Messages that are not valid SMS delivery records are ignored and logged without their body.
+Each scan uses `AT+CMGL="ALL"`, not only `REC UNREAD`. Listing a message may change its state from unread to read; scanning all messages therefore ensures failed deliveries remain eligible for retry. Only structurally valid SMS-DELIVER records with `REC READ` or `REC UNREAD` status become incoming messages. The parser checks the DELIVER sender/timestamp layout; status alone is insufficient because SMS-STATUS-REPORT uses the same REC statuses. STO SENT/UNSENT and structurally valid STATUS-REPORT records are retained untouched and excluded from delivery, confirmation and deletion. A bodyless STATUS-REPORT is a complete record, while an incoming DELIVER requires at least one actual body line (an explicit blank line is allowed). A malformed incoming header or non-UCS2 serial body fails the scan closed. UCS2 hexadecimal values are converted to UTF-8.
 
 The modem or SIM remains the authoritative pending-message queue. The daemon does not delete a message before confirmed Telegram delivery. Concatenated SMS behavior follows what the modem exposes in text mode: an assembled message is forwarded once; separately stored segments are forwarded as separate messages.
 
@@ -103,7 +107,7 @@ Untrusted SMS text is passed as data rather than shell syntax. The daemon writes
 
 ## Router-Only Egress and Proxy Behavior
 
-The daemon must not activate, configure, or route through the modem's RNDIS interface. Before every Telegram attempt it runs `ip -4 route get 1.1.1.1`, parses the selected `dev` field, and permits sending only when that value exactly matches `allowed_wan_device`, whose default is `eth0`.
+The daemon must not activate, configure, or route through the modem's RNDIS interface. Before every Telegram request, including each individual multipart request, it runs `ip -4 route get 1.1.1.1`, parses the selected `dev` field, and permits sending only when that value exactly matches `allowed_wan_device`, whose default is `eth0`.
 
 If the default route is absent, uses `eth2`, or uses any device other than the configured `eth0`, the daemon does not call Telegram. The SMS remains stored for a later retry. This fail-closed behavior protects against a future cellular failover route.
 
@@ -118,11 +122,15 @@ For each stored SMS:
 3. Verify that the current default route uses `eth0`.
 4. Call Telegram `sendMessage` using HTTPS, the configured Bot Token and Chat ID, and plain-text form data.
 5. Require both a successful HTTP status and Telegram JSON field `ok: true` for every message part.
-6. Atomically record the confirmed fingerprint in `/var/lib/sms2telegram/delivered`.
+6. Atomically record the confirmed fingerprint in `/etc/sms2telegram/delivered`.
 7. Delete the modem record with `AT+CMGD=<index>`.
 8. Remove the ledger entry after the modem confirms deletion or after a later scan proves that the indexed message no longer exists.
 
 This order prevents a confirmed message from being resent when modem deletion fails or the router reboots between Telegram success and deletion. If Telegram accepts a request but its response is lost before the router receives it, the daemon cannot prove success and may send the message again. The system therefore provides at-least-once delivery, preferring rare duplication over message loss.
+
+The target's `/var` resolves to volatile `/tmp`, so confirmation state must live under persistent `/etc`. Before constructing a worker, ledger opening creates a missing parent directory, rejects a non-directory or symlink, repairs its permissions to `0700`, and verifies them. Preparation failure logs only category `ledger` and blocks scanning/sending/deletion for that cycle. Tests override the ledger path to an isolated `/tmp` directory, including first-start and process-restart cases.
+
+A multipart SMS is confirmed only after every part succeeds. If a later part fails or its route becomes disallowed, no confirmation is written and the stored SMS is retained. A later retry starts again from the first part, so previously accepted parts can appear twice.
 
 The ledger contains one tab-separated `<index>\t<sha256>` record per confirmed but not-yet-deleted SMS. It is rewritten through a mode-`0600` temporary file followed by atomic rename to avoid corruption during power loss. If an SMS index is reused for different content, the fingerprint differs and the new message is not mistaken for the old one.
 
@@ -161,6 +169,9 @@ Development follows test-first cycles. Pure Lua tests run on the router's actual
 - Parsing routes that allow `eth0` and rejecting `eth2`, missing routes, and unknown devices
 - Retry backoff limits
 - Delivered-ledger matching and index reuse
+- First-start parent creation, `0700` directory repair, and disk-backed delete-only recovery after daemon restart
+- Numeric nixio write errors (`false/nil, errno, message`), bounded EAGAIN/EWOULDBLOCK retries and partial writes
+- Mixed outgoing/status-report/incoming CMGL frames and per-part route changes
 
 Integration checks use the real Air780EPV AT device but initially issue only non-destructive identification and capability queries. IPK verification checks control metadata, conffile declarations, ownership and modes, init-script syntax, package extraction, and install/remove script behavior in a temporary root.
 

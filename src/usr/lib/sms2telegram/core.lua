@@ -143,6 +143,34 @@ local function decode_body(lines)
   return table.concat(decoded, "\n")
 end
 
+local function sms_timestamp(value)
+  return value and value:match("^%d%d/%d%d/%d%d,%d%d:%d%d:%d%d[+-]%d%d$")
+end
+
+function M.cmgl_record_type(header)
+  local fields, err = csv_fields(header)
+  if not fields or not fields[1]:match("^[1-9][0-9]*$") then
+    return nil, err or "malformed CMGL header"
+  end
+  local status = fields[2]
+  if status == "STO UNSENT" or status == "STO SENT" then
+    if #fields >= 4 then return "outgoing", fields end
+  elseif status == "REC READ" or status == "REC UNREAD" then
+    -- STATUS-REPORT includes FO/MR before the recipient, then two timestamps.
+    -- Its REC status is also used by DELIVER and cannot identify the TPDU type.
+    local fo = tonumber(fields[3])
+    if #fields == 9 and fo and fo % 4 == 2 and tonumber(fields[4]) and
+        tonumber(fields[6]) and sms_timestamp(fields[7]) and sms_timestamp(fields[8]) and
+        tonumber(fields[9]) then
+      return "report", fields
+    end
+    if (#fields == 5 or #fields == 7) and fields[3] ~= "" and sms_timestamp(fields[5]) then
+      return "incoming", fields
+    end
+  end
+  return nil, "malformed CMGL header"
+end
+
 function M.parse_cmgl(response)
   if type(response) ~= "string" then return nil, "CMGL response must be a string" end
   response = response:gsub("\r\n", "\n"):gsub("\r", "\n")
@@ -162,6 +190,8 @@ function M.parse_cmgl(response)
   local messages, current, terminal = {}, nil, false
   local function finish_record()
     if not current then return true end
+    if current.kind ~= "incoming" then current = nil return true end
+    if #current.body_lines == 0 then return nil, "missing CMGL incoming body" end
     local sender, sender_err = decode_text(current.fields[3])
     if not sender then return nil, sender_err end
     local body, body_err = decode_body(current.body_lines)
@@ -186,11 +216,11 @@ function M.parse_cmgl(response)
     if header then
       local ok, err = finish_record()
       if not ok then return nil, err end
-      local fields, fields_err = csv_fields(header)
-      if not fields or #fields < 5 or not tonumber(fields[1]) then
-        return nil, fields_err or "malformed CMGL header"
+      local kind, fields = M.cmgl_record_type(header)
+      if not kind then
+        return nil, fields
       end
-      current = { fields = fields, body_lines = {} }
+      current = { kind = kind, fields = fields, body_lines = {} }
     elseif i == terminal_index then
       local ok, err = finish_record()
       if not ok then return nil, err end

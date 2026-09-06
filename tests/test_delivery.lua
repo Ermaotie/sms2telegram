@@ -72,14 +72,38 @@ local digest = assert(delivery.fingerprint({
   hashed_mode = mode(path)
   canonical = assert(read_file(path))
   return string.rep("a", 64)
-end))
+end, "SM"))
 t.eq("fingerprint digest", digest, string.rep("a", 64))
 t.eq("fingerprint canonical", canonical,
-  "7\0" .. tostring(#"+8613800000000") .. "\0+8613800000000\0" ..
+  "2\0SM\0" .. "7\0" .. tostring(#"+8613800000000") .. "\0+8613800000000\0" ..
   tostring(#"26/09/05,14:30:00+32") .. "\0" .. "26/09/05,14:30:00+32\0" ..
   tostring(#"hello") .. "\0hello")
 t.eq("fingerprint temporary mode", hashed_mode, "600")
 t.eq("fingerprint temporary cleanup", read_file(hashed_path), nil)
+local same_message = { index = 7, sender = "+8613800000000", timestamp = "26/09/05,14:30:00+32", body = "hello" }
+local sm_digest = assert(delivery.fingerprint(same_message, nil, "SM"))
+local me_digest = assert(delivery.fingerprint(same_message, nil, "ME"))
+t.eq("storage domains cannot share confirmations", sm_digest == me_digest, false)
+
+-- First start must prepare an absent parent, repair permissions, and reject files.
+local fresh_parent = test_dir .. "/first-start"
+local fresh_ledger = delivery.Ledger.new(fresh_parent .. "/delivered")
+t.truthy("first-start ledger opens with missing parent", fresh_ledger)
+t.eq("first-start ledger parent mode", mode(fresh_parent), "700")
+if fresh_ledger then
+  assert(fresh_ledger:add(7, string.rep("a", 64)))
+  t.eq("first-start ledger saves confirmation", fresh_ledger:save_atomic(), true)
+  t.eq("first-start runtime ledger mode", mode(fresh_parent .. "/delivered"), "600")
+end
+shell_status("chmod 755 " .. quote(fresh_parent) .. " 2>/dev/null")
+delivery.Ledger.new(fresh_parent .. "/delivered")
+t.eq("existing ledger parent permissions repaired", mode(fresh_parent), "700")
+local blocked_parent = test_dir .. "/parent-file"
+local blocked_file = assert(io.open(blocked_parent, "wb")); blocked_file:write("file"); blocked_file:close()
+t.eq("ledger rejects parent that is a file", delivery.Ledger.new(blocked_parent .. "/delivered"), nil)
+os.remove(blocked_parent)
+os.remove(fresh_parent .. "/delivered")
+shell_status("rmdir " .. quote(fresh_parent) .. " 2>/dev/null")
 
 local fs = {
   open = io.open,

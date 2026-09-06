@@ -381,4 +381,52 @@ t.eq("blank frame does not throw", blank_call_ok, true)
 t.eq("blank frame result", blank_value, nil)
 t.truthy("blank frame error", blank_err and blank_err:match("terminal"))
 
+-- Exercise the real transport with nixio's numeric errno and third-value message.
+for _, case in ipairs({ "retry-partial", "retry-timeout", "io-error" }) do
+  local transport, restore = real_transport_with_chunks({ "OK\r\n" })
+  local calls, pending, now = 0, {}, 0
+  transport.nixio.gettimeofday = function() return 0, now * 1000 end
+  transport.fd.write = function(_, bytes)
+    calls = calls + 1
+    pending[#pending + 1] = bytes
+    now = now + 1
+    if case == "io-error" then return false, 5, "Input/output error" end
+    if calls == 1 or case == "retry-timeout" then return false, 11, "Resource temporarily unavailable" end
+    if calls == 2 then return 1 end
+    return #bytes
+  end
+  local tested = at.Client.new(transport, core, { timeout_ms = 10 })
+  local called, result, err = pcall(tested.command, tested, "AT")
+  t.eq(case .. " write never throws on numeric errno", called, true)
+  if case == "retry-partial" then
+    t.eq("EAGAIN and partial write complete command", result, "OK\n")
+    t.eq("partial write resumes at remaining bytes", table.concat(pending, "|"), "AT\r|AT\r|T\r")
+  elseif case == "retry-timeout" then
+    t.eq("repeated EAGAIN fails under deadline", result, nil)
+    t.eq("repeated EAGAIN bounded calls", calls, 10)
+    t.eq("repeated EAGAIN diagnostic", err, "write timeout")
+  else
+    t.eq("numeric IO failure propagates as AT error", result, nil)
+    t.eq("numeric IO failure uses third return value", err, "Input/output error")
+  end
+  restore()
+end
+
+local mixed_transport, restore_mixed = real_transport_with_chunks({ table.concat({
+  '+CMGL: 1,"STO UNSENT","+8613800000000",', '00610062',
+  '+CMGL: 2,"STO SENT","+8613800000000",', '00630064',
+  '+CMGL: 3,"REC READ",6,42,"+8613800000000",145,"26/09/05,14:30:00+32","26/09/05,14:31:00+32",0',
+  '+CMGL: 4,"REC UNREAD","+8613800000000",,"26/09/05,14:32:00+32"', '004F004B',
+  'OK', ''
+}, '\r\n') })
+local mixed_scan = at.Client.new(mixed_transport, core, { timeout_ms = 100 }):scan()
+t.eq("transport frames bodyless report within mixed scan", mixed_scan and #mixed_scan, 1)
+t.eq("transport emits only incoming DELIVER", mixed_scan and mixed_scan[1].index, 4)
+restore_mixed()
+local report_transport, restore_report = real_transport_with_chunks({
+  '+CMGL: 3,"REC UNREAD",6,42,"+8613800000000",145,"26/09/05,14:30:00+32","26/09/05,14:31:00+32",0\r\nOK\r\n'
+})
+local report_scan = at.Client.new(report_transport, core, { timeout_ms = 100 }):scan()
+t.eq("terminal bodyless status report yields empty incoming scan", report_scan and #report_scan, 0)
+restore_report()
 t.finish()

@@ -68,6 +68,10 @@ usr/share/doc/sms2telegram/README.zh-CN.md'
 actual_data=$(tar -tzf "$TMP/data.tar.gz" | sed -e 's#^\./##' -e '/\/$/d')
 assert_eq "$actual_data" "$expected_data" "data archive paths"
 pass "data archive paths"
+[ -d "$TMP/data/etc/sms2telegram" ] || fail "missing persistent ledger directory"
+assert_eq "$(mode_of "$TMP/data/etc/sms2telegram")" "700" "persistent ledger directory mode"
+[ ! -e "$TMP/data/etc/sms2telegram/delivered" ] || fail "runtime ledger must not be packaged"
+pass "persistent ledger directory without runtime state"
 
 for path in \
     etc/config/sms2telegram \

@@ -35,7 +35,7 @@ function Client:command(text)
   if not ok then return nil, write_err or "AT write failed" end
 
   local frame, read_err = self.transport:read_result(
-    remaining or self.timeout_ms, allowed_prefixes_for(text), text:match("^AT%+CMGL") ~= nil
+    remaining or self.timeout_ms, allowed_prefixes_for(text), text:match("^AT%+CMGL") ~= nil, self.core
   )
   if not frame then return nil, read_err or "AT command timed out" end
 
@@ -133,10 +133,10 @@ function Transport:write_all(bytes, timeout_ms)
     local ready, poll_err = self:poll_write(remaining)
     if ready == nil then return nil, poll_err end
     if not ready then return nil, "write timeout" end
-    local written, err = self.fd:write(bytes:sub(offset))
+    local written, errno, err = self.fd:write(bytes:sub(offset))
     if not written then
-      if err and err:lower():match("would block") then
-        -- The descriptor remains nonblocking; wait for the next writable edge.
+      if errno == 11 then
+        -- Linux EAGAIN and EWOULDBLOCK are both 11; keep the command deadline.
       else
         return nil, err or "serial write failed"
       end
@@ -196,7 +196,7 @@ function Transport:next_line(timeout_ms)
   end
 end
 
-function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode)
+function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode, core)
   local lines = {}
   local deadline = now_ms(self.nixio) + timeout_ms
   local ambiguous_cmgl = false
@@ -212,10 +212,13 @@ function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode)
   local function complete_cmgl()
     local record, saw_header
     for _, line in ipairs(lines) do
-      if line:match("^%+CMGL:%s*%d+") then
-        if record and not record.has_body then return false end
+      local header = line:match("^%+CMGL:%s*(.*)$")
+      if header then
+        if record and record.kind ~= "report" and not record.has_body then return false end
+        local kind = core.cmgl_record_type(header)
+        if not kind then return false end
         saw_header = true
-        record = { has_body = false }
+        record = { kind = kind, has_body = false }
       elseif not saw_header then
         if line ~= "" then return false end
       else
@@ -225,7 +228,7 @@ function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode)
         end
       end
     end
-    return not record or record.has_body
+    return not record or record.kind == "report" or record.has_body
   end
   while true do
     local line = pop_line(self)

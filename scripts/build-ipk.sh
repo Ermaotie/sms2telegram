@@ -80,6 +80,8 @@ create_portable_ar() {
 rm -rf "$BUILD"
 mkdir -p "$STAGE" "$CONTROL" "$REPO/dist"
 cp -R "$REPO/src/." "$STAGE/"
+mkdir -p "$STAGE/etc/sms2telegram"
+chmod 0700 "$STAGE/etc/sms2telegram"
 cp "$REPO/ipk/control/control" "$REPO/ipk/control/conffiles" \
     "$REPO/ipk/control/postinst" "$REPO/ipk/control/prerm" "$CONTROL/"
 
@@ -91,6 +93,7 @@ chmod 0755 "$STAGE/etc/init.d/sms2telegram" "$STAGE/usr/sbin/sms2telegram" \
 # 1980 avoids a negative local timestamp on UTC+ timezones, which ustar cannot
 # encode (unlike the Unix epoch at local midnight).
 find "$STAGE" "$CONTROL" -type f -exec touch -t 198001010000 {} +
+touch -t 198001010000 "$STAGE/etc/sms2telegram"
 
 if find "$STAGE" "$CONTROL" -type f -size 0 -print | grep -q .; then
     echo "refusing to package an empty source file" >&2
@@ -125,7 +128,7 @@ scan_secrets "$STAGE" "$CONTROL" "$ROUTER_SOURCE" "$TELEGRAM_SOURCE"
 (
     cd "$STAGE"
     set -- $(tar_flags_for "$(tar_style)")
-    LC_ALL=C find . -type f -print | LC_ALL=C sort | xargs tar "$@" -cf "$BUILD/data.tar"
+    LC_ALL=C find . \( -type f -o -path './etc/sms2telegram' \) -print | LC_ALL=C sort | xargs tar "$@" -cf "$BUILD/data.tar"
 )
 gzip -n -f "$BUILD/control.tar"
 gzip -n -f "$BUILD/data.tar"

@@ -30,7 +30,7 @@ function Worker:cycle()
   local first_error
   local at_failed = false
   for _, message in ipairs(messages) do
-    local fingerprint = deps.delivery.fingerprint(message)
+    local fingerprint = deps.delivery.fingerprint(message, nil, config.storage or "SM")
     if not fingerprint then
       first_error = first_error or "ledger"
     elseif deps.ledger:contains(message.index, fingerprint) then
@@ -49,40 +49,44 @@ function Worker:cycle()
         end
       end
     elseif not first_error then
-      local route_output = deps.route()
-      local route_ok = deps.delivery.route_allowed(route_output, config.allowed_wan_device, deps.core)
-      if not route_ok then
-        first_error = "route"
+      local parts = deps.core.format_parts(message, config.telegram_limit or 4096)
+      if not parts then
+        first_error = "at"
       else
-        local parts = deps.core.format_parts(message, config.telegram_limit or 4096)
-        if not parts then
-          first_error = "at"
-        else
-          local sent = deps.sender:send_parts(config.bot_token, config.chat_id, parts)
+        for _, part in ipairs(parts) do
+          local route_output = deps.route()
+          local route_ok = deps.delivery.route_allowed(route_output, config.allowed_wan_device, deps.core)
+          if not route_ok then
+            first_error = "route"
+            break
+          end
+          local sent = deps.sender:send_parts(config.bot_token, config.chat_id, { part })
           if not sent then
             first_error = "telegram"
+            break
+          end
+        end
+        if not first_error then
+          local added = deps.ledger:add(message.index, fingerprint)
+          if not added then
+            first_error = "ledger"
           else
-            local added = deps.ledger:add(message.index, fingerprint)
-            if not added then
+            local saved = deps.ledger:save_atomic()
+            if not saved then
               first_error = "ledger"
             else
-              local saved = deps.ledger:save_atomic()
-              if not saved then
-                first_error = "ledger"
+              local deleted = deps.at_client:delete(message.index)
+              if not deleted then
+                first_error = "at"
+                at_failed = true
+                break
               else
-                local deleted = deps.at_client:delete(message.index)
-                if not deleted then
-                  first_error = "at"
-                  at_failed = true
-                  break
+                local removed = deps.ledger:remove(message.index, fingerprint)
+                if not removed then
+                  first_error = "ledger"
                 else
-                  local removed = deps.ledger:remove(message.index, fingerprint)
-                  if not removed then
-                    first_error = "ledger"
-                  else
-                    local removed_saved = deps.ledger:save_atomic()
-                    if not removed_saved then first_error = "ledger" end
-                  end
+                  local removed_saved = deps.ledger:save_atomic()
+                  if not removed_saved then first_error = "ledger" end
                 end
               end
             end

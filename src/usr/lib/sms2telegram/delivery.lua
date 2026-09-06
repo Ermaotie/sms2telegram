@@ -59,11 +59,31 @@ local function chmod(path, permissions)
   return command_ok(status), "chmod failed"
 end
 
+local function prepare_directory(path)
+  local loaded, nixio = pcall(require, "nixio")
+  if not loaded or not nixio.fs then return nil, "ledger filesystem unavailable" end
+  local metadata = nixio.fs.lstat(path)
+  if not metadata then
+    if not command_ok(os.execute("mkdir -m 700 " .. shell_quote(path) .. " 2>/dev/null")) then
+      return nil, "unable to create ledger directory"
+    end
+    metadata = nixio.fs.lstat(path)
+  end
+  if not metadata or metadata.type ~= "dir" then return nil, "invalid ledger directory" end
+  if not chmod(path, "0700") then return nil, "unable to protect ledger directory" end
+  metadata = nixio.fs.lstat(path)
+  if not metadata or metadata.type ~= "dir" or tostring(metadata.modedec) ~= "700" then
+    return nil, "unable to verify ledger directory"
+  end
+  return true
+end
+
 local default_fs = {
   open = io.open,
   rename = os.rename,
   remove = os.remove,
-  chmod = chmod
+  chmod = chmod,
+  prepare_directory = prepare_directory
 }
 
 local function close_file(file)
@@ -160,16 +180,17 @@ local function default_sha256(path)
   return output:match("^([0-9a-fA-F]+)%s")
 end
 
-function M.fingerprint(message, sha256_fn)
+function M.fingerprint(message, sha256_fn, storage)
   if type(message) ~= "table" or type(message.sender) ~= "string" or
       type(message.timestamp) ~= "string" or type(message.body) ~= "string" or
-      message.index == nil then
+      message.index == nil or type(storage) ~= "string" or not storage:match("^[A-Z][A-Z0-9]*$") then
     return nil, "invalid message fingerprint input"
   end
   local pid, pid_err = current_pid()
   if not pid then return nil, pid_err end
   local path = "/tmp/sms2telegram." .. pid .. ".fingerprint"
   local canonical = table.concat({
+    tostring(#storage), storage,
     tostring(message.index),
     tostring(#message.sender), message.sender,
     tostring(#message.timestamp), message.timestamp,
@@ -215,6 +236,12 @@ function Ledger.new(path, fs)
   if type(fs.open) ~= "function" or type(fs.rename) ~= "function" or
       type(fs.remove) ~= "function" or type(fs.chmod) ~= "function" then
     return nil, "invalid ledger filesystem"
+  end
+  if fs.prepare_directory then
+    local parent = path:match("^(.*)/[^/]+$")
+    if not parent or parent == "" then return nil, "invalid ledger directory" end
+    local prepared, prepare_err = fs.prepare_directory(parent)
+    if not prepared then return nil, prepare_err end
   end
   local data, read_err = read_all(fs, path)
   if not data then

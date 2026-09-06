@@ -6,7 +6,7 @@ local core = dofile(libdir .. "/core.lua")
 local at = dofile(libdir .. "/at.lua")
 local delivery = dofile(libdir .. "/delivery.lua")
 local worker_module = dofile(libdir .. "/worker.lua")
-local ledger_path = os.getenv("SMS2TELEGRAM_LEDGER_PATH") or "/var/lib/sms2telegram/delivered"
+local ledger_path = os.getenv("SMS2TELEGRAM_LEDGER_PATH") or "/etc/sms2telegram/delivered"
 
 pcall(nixio.openlog, "sms2telegram")
 

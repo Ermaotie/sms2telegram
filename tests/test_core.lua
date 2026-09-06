@@ -79,4 +79,21 @@ t.truthy("two-digit multipart count", #ten_parts >= 10)
 for i, part in ipairs(ten_parts) do
   t.eq("two-digit part fits " .. i, tostring(core.utf8_length(part) <= 4096), "true")
 end
+local mixed_response = table.concat({
+  '+CMGL: 1,"STO UNSENT","+8613800000000",', '00610062',
+  '+CMGL: 2,"STO SENT","+8613800000000",', '00630064',
+  '+CMGL: 3,"REC READ",6,42,"+8613800000000",145,"26/09/05,14:30:00+32","26/09/05,14:31:00+32",0',
+  '+CMGL: 4,"REC UNREAD","+8613800000000",,"26/09/05,14:32:00+32"', '004F004B',
+  '+CMGL: 5,"REC READ","+8613800000000",,"26/09/05,14:33:00+32"', '',
+  'OK', ''
+}, '\r\n')
+local mixed_messages = core.parse_cmgl(mixed_response)
+t.eq("mixed CMGL returns incoming deliveries only", mixed_messages and #mixed_messages, 2)
+t.eq("mixed CMGL preserves incoming index", mixed_messages and mixed_messages[1].index, 4)
+t.eq("mixed CMGL decodes incoming body", mixed_messages and mixed_messages[1].body, "OK")
+t.eq("mixed CMGL preserves explicit blank incoming body", mixed_messages and mixed_messages[2] and mixed_messages[2].body, "")
+local missing_body = '+CMGL: 6,"REC READ","+8613800000000",,"26/09/05,14:32:00+32"\r\nOK\r\n'
+t.eq("incoming header without body is rejected", core.parse_cmgl(missing_body), nil)
+local invalid_header = '+CMGL: 6,"REC READ",6,42,"not a timestamp"\r\n004F004B\r\nOK\r\n'
+t.eq("REC status alone cannot identify SMS DELIVER", core.parse_cmgl(invalid_header), nil)
 t.finish()
