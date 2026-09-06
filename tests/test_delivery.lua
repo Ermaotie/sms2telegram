@@ -141,6 +141,13 @@ t.eq("ledger does not match changed fingerprint", reloaded:contains(7, string.re
 assert(reloaded:remove(7, string.rep("a", 64)))
 assert(reloaded:save_atomic())
 t.eq("ledger saved empty after removal", read_file(ledger_path), "")
+local zero_digest = string.rep("b", 64)
+t.eq("ledger accepts index zero", reloaded:add(0, zero_digest), true)
+assert(reloaded:save_atomic())
+local zero_reloaded = assert(delivery.Ledger.new(ledger_path, fs))
+t.eq("ledger reloads index zero", zero_reloaded:contains(0, zero_digest), true)
+assert(zero_reloaded:remove(0, zero_digest))
+assert(zero_reloaded:save_atomic())
 
 local pid = process_id()
 local message_path = "/tmp/sms2telegram." .. pid .. ".message"

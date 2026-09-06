@@ -48,7 +48,7 @@ pass "control archive paths"
 
 control_field() { awk -F ': ' -v key="$1" '$1 == key { print substr($0, length(key) + 3); exit }' "$TMP/control/control"; }
 assert_eq "$(control_field Package)" "sms2telegram" "package name"
-assert_eq "$(control_field Version)" "1.0.1" "package version"
+assert_eq "$(control_field Version)" "1.0.2" "package version"
 assert_eq "$(control_field Architecture)" "all" "package architecture"
 assert_eq "$(control_field Depends)" "lua, luci-lib-nixio, coreutils-stty, curl, ca-bundle, jsonfilter" "package dependencies"
 pass "control metadata"

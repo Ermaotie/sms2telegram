@@ -3,6 +3,8 @@
 本服务从 Air780EPV 读取短信，并通过路由器的 Telegram 连接转发。安装后由
 OpenWrt `procd` 管理并随系统启动。
 
+模块使用 PDU 模式读取短信，以模块返回的 TPDU 长度和 DCS 编码为准，不根据正文外观猜测编码。
+
 ## 安装和配置
 
 首次使用前，请先在 Telegram 中打开 Bot 并发送 `/start`。Bot 无法主动联系一个
@@ -11,7 +13,7 @@ OpenWrt `procd` 管理并随系统启动。
 在路由器上执行：
 
 ```sh
-opkg install /tmp/sms2telegram_1.0.1_all.ipk
+opkg install /tmp/sms2telegram_1.0.2_all.ipk
 uci set sms2telegram.main.bot_token='123456:replace_with_real_token'
 uci set sms2telegram.main.chat_id='-1001234567890'
 uci commit sms2telegram

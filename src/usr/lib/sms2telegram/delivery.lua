@@ -212,7 +212,8 @@ local Ledger = {}
 Ledger.__index = Ledger
 
 local function valid_index(index)
-  return tostring(index):match("^[1-9][0-9]*$") ~= nil
+  index = tostring(index)
+  return index == "0" or index:match("^[1-9][0-9]*$") ~= nil
 end
 
 local function parse_ledger(data)

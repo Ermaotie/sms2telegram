@@ -81,7 +81,11 @@ local function is_ucs2_hex(value)
 end
 
 local function decode_text(value)
-  if not is_ucs2_hex(value) then return value end
+  if not is_ucs2_hex(value) then
+    local ok, err = pcall(M.utf8_length, value)
+    if not ok then return nil, "invalid UTF-8 text: " .. tostring(err) end
+    return value
+  end
   return M.ucs2_to_utf8(value)
 end
 
@@ -131,28 +135,220 @@ local function csv_fields(line)
 end
 
 local function decode_body(lines)
-  local joined = table.concat(lines)
-  if is_ucs2_hex(joined) then return M.ucs2_to_utf8(joined) end
-
   local decoded = {}
   for i, line in ipairs(lines) do
-    local text, err = decode_text(line)
-    if not text then return nil, err end
-    decoded[i] = text
+    local ok, err = pcall(M.utf8_length, line)
+    if not ok then return nil, "invalid UTF-8 text: " .. tostring(err) end
+    decoded[i] = line
   end
   return table.concat(decoded, "\n")
 end
 
 local function sms_timestamp(value)
-  return value and value:match("^%d%d/%d%d/%d%d,%d%d:%d%d:%d%d[+-]%d%d$")
+  return value and value:match("^%d%d/%d%d/%d%d,%d%d:%d%d:%d%d ?[+-]%d%d$")
+end
+
+local function valid_index(value)
+  return value == "0" or (type(value) == "string" and value:match("^[1-9][0-9]*$"))
+end
+
+local function hex_bytes(hex)
+  if type(hex) ~= "string" or #hex % 2 ~= 0 or hex:find("[^0-9A-Fa-f]") then
+    return nil, "invalid PDU hexadecimal input"
+  end
+  local bytes = {}
+  for pos = 1, #hex, 2 do bytes[#bytes + 1] = tonumber(hex:sub(pos, pos + 1), 16) end
+  return bytes
+end
+
+local function swapped_digits(bytes, pos, octets, digits)
+  local out = {}
+  for offset = 0, octets - 1 do
+    local byte = bytes[pos + offset]
+    if not byte then return nil, "truncated PDU address" end
+    out[#out + 1] = string.format("%X%X", byte % 16, math.floor(byte / 16))
+  end
+  return table.concat(out):sub(1, digits)
+end
+
+local gsm_special = {
+  [0] = "@", [1] = "£", [2] = "$", [3] = "¥", [4] = "è", [5] = "é",
+  [6] = "ù", [7] = "ì", [8] = "ò", [9] = "Ç", [10] = "\n", [11] = "Ø",
+  [12] = "ø", [13] = "\r", [14] = "Å", [15] = "å", [16] = "Δ", [17] = "_",
+  [18] = "Φ", [19] = "Γ", [20] = "Λ", [21] = "Ω", [22] = "Π", [23] = "Ψ",
+  [24] = "Σ", [25] = "Θ", [26] = "Ξ", [28] = "Æ", [29] = "æ", [30] = "ß",
+  [31] = "É", [36] = "¤", [64] = "¡", [91] = "Ä", [92] = "Ö", [93] = "Ñ",
+  [94] = "Ü", [95] = "§", [96] = "¿", [123] = "ä", [124] = "ö", [125] = "ñ",
+  [126] = "ü", [127] = "à"
+}
+local gsm_extension = {
+  [10] = "\f", [20] = "^", [40] = "{", [41] = "}", [47] = "\\",
+  [60] = "[", [61] = "~", [62] = "]", [64] = "|", [101] = "€"
+}
+
+local function gsm_char(value)
+  if gsm_special[value] then return gsm_special[value] end
+  if (value >= 32 and value <= 35) or (value >= 37 and value <= 63) or
+      (value >= 65 and value <= 90) or (value >= 97 and value <= 122) then
+    return string.char(value)
+  end
+  return "�"
+end
+
+local function decode_gsm7(bytes, septets, start_septet)
+  local out, escaped = {}, false
+  start_septet = start_septet or 0
+  for number = start_septet, start_septet + septets - 1 do
+    local bit = number * 7
+    local index = math.floor(bit / 8) + 1
+    local shift = bit % 8
+    if not bytes[index] then return nil, "truncated GSM7 user data" end
+    local value = math.floor(bytes[index] / (2 ^ shift))
+    if shift > 1 then
+      if not bytes[index + 1] then return nil, "truncated GSM7 user data" end
+      value = value + bytes[index + 1] * (2 ^ (8 - shift))
+    end
+    value = value % 128
+    if escaped then
+      out[#out + 1] = gsm_extension[value] or "�"
+      escaped = false
+    elseif value == 27 then
+      escaped = true
+    else
+      out[#out + 1] = gsm_char(value)
+    end
+  end
+  if escaped then return nil, "truncated GSM7 escape" end
+  return table.concat(out)
+end
+
+local function decode_timestamp(bytes, pos)
+  for offset = 0, 6 do
+    if not bytes[pos + offset] then return nil, "truncated PDU timestamp" end
+  end
+  local function pair(byte) return string.format("%X%X", byte % 16, math.floor(byte / 16)) end
+  local timezone = bytes[pos + 6]
+  local low, high = timezone % 16, math.floor(timezone / 16)
+  local sign = "+"
+  if low >= 8 then sign, low = "-", low - 8 end
+  return table.concat({
+    pair(bytes[pos]), "/", pair(bytes[pos + 1]), "/", pair(bytes[pos + 2]), ",",
+    pair(bytes[pos + 3]), ":", pair(bytes[pos + 4]), ":", pair(bytes[pos + 5]),
+    sign, string.format("%X%X", low, high)
+  })
+end
+
+local function pdu_alphabet(dcs)
+  local group = math.floor(dcs / 16)
+  if group <= 3 then
+    if math.floor(dcs / 32) % 2 == 1 then return nil, "compressed PDU is unsupported" end
+    local alphabet = math.floor(dcs / 4) % 4
+    if alphabet == 3 then return nil, "reserved PDU data coding scheme" end
+    return alphabet
+  end
+  if group == 12 or group == 13 then return 0 end
+  if group == 14 then return 2 end
+  if group == 15 then return math.floor(dcs / 4) % 2 end
+  return nil, "unsupported PDU data coding scheme"
+end
+
+function M.pdu_matches_length(pdu, tpdu_length)
+  local bytes = hex_bytes(pdu)
+  local length = tonumber(tpdu_length)
+  if not bytes or not length or length < 1 or length % 1 ~= 0 or not bytes[1] then return false end
+  return #bytes == 1 + bytes[1] + length
+end
+
+function M.decode_sms_pdu(pdu)
+  local bytes, bytes_err = hex_bytes(pdu)
+  if not bytes then return nil, bytes_err end
+  local smsc_length = bytes[1]
+  if not smsc_length or #bytes < 2 + smsc_length then return nil, "truncated SMSC address" end
+  local pos = 2 + smsc_length
+  local first = bytes[pos]
+  if not first then return nil, "missing PDU first octet" end
+  local mti = first % 4
+  if mti == 1 then return { kind = "outgoing" } end
+  if mti == 2 then return { kind = "report" } end
+  if mti ~= 0 then return nil, "unsupported PDU message type" end
+  local udhi = math.floor(first / 64) % 2 == 1
+  pos = pos + 1
+
+  local address_length, toa = bytes[pos], bytes[pos + 1]
+  if not address_length or not toa then return nil, "truncated PDU sender" end
+  pos = pos + 2
+  local sender
+  if math.floor(toa / 16) % 8 == 5 then
+    local address_octets = math.ceil(address_length / 2)
+    local address_septets = math.floor(address_length * 4 / 7)
+    local address_bytes = {}
+    for offset = 0, address_octets - 1 do address_bytes[#address_bytes + 1] = bytes[pos + offset] end
+    sender = decode_gsm7(address_bytes, address_septets)
+    if not sender then return nil, "invalid alphanumeric PDU sender" end
+    pos = pos + address_octets
+  else
+    local address_octets = math.ceil(address_length / 2)
+    sender = swapped_digits(bytes, pos, address_octets, address_length)
+    if not sender then return nil, "truncated PDU sender" end
+    if sender:find("[^0-9]") then return nil, "invalid PDU sender digits" end
+    if math.floor(toa / 16) % 8 == 1 then sender = "+" .. sender end
+    pos = pos + address_octets
+  end
+
+  if not bytes[pos] or not bytes[pos + 1] then return nil, "truncated PDU protocol fields" end
+  local dcs = bytes[pos + 1]
+  pos = pos + 2
+  local timestamp, timestamp_err = decode_timestamp(bytes, pos)
+  if not timestamp then return nil, timestamp_err end
+  pos = pos + 7
+  local udl = bytes[pos]
+  if not udl then return nil, "missing PDU user data length" end
+  pos = pos + 1
+  local user_data = {}
+  for index = pos, #bytes do user_data[#user_data + 1] = bytes[index] end
+
+  local alphabet, alphabet_err = pdu_alphabet(dcs)
+  if alphabet == nil then return nil, alphabet_err end
+  local body
+  if alphabet == 0 then
+    if #user_data ~= math.ceil(udl * 7 / 8) then return nil, "GSM7 user data length mismatch" end
+    local header_septets = 0
+    if udhi then
+      if not user_data[1] then return nil, "missing PDU user data header" end
+      header_septets = math.ceil((user_data[1] + 1) * 8 / 7)
+      if header_septets > udl then return nil, "invalid PDU user data header" end
+    end
+    body = decode_gsm7(user_data, udl - header_septets, header_septets)
+  elseif alphabet == 2 then
+    if #user_data ~= udl then return nil, "UCS2 user data length mismatch" end
+    local start = 1
+    if udhi then
+      if not user_data[1] then return nil, "missing PDU user data header" end
+      start = user_data[1] + 2
+    end
+    if start > udl + 1 or (udl - start + 1) % 2 ~= 0 then
+      return nil, "invalid UCS2 user data"
+    end
+    local hex = {}
+    for index = start, udl do hex[#hex + 1] = string.format("%02X", user_data[index]) end
+    body = M.ucs2_to_utf8(table.concat(hex))
+  else
+    return nil, "unsupported PDU data coding scheme"
+  end
+  if not body then return nil, "invalid PDU user data" end
+  return { kind = "incoming", sender = sender, timestamp = timestamp, body = body }
 end
 
 function M.cmgl_record_type(header)
   local fields, err = csv_fields(header)
-  if not fields or not fields[1]:match("^[1-9][0-9]*$") then
+  if not fields or not valid_index(fields[1]) then
     return nil, err or "malformed CMGL header"
   end
   local status = fields[2]
+  if #fields == 4 and status:match("^[0-3]$") and
+      tonumber(fields[4]) and tonumber(fields[4]) > 0 then
+    return "pdu", fields
+  end
   if status == "STO UNSENT" or status == "STO SENT" then
     if #fields >= 4 then return "outgoing", fields end
   elseif status == "REC READ" or status == "REC UNREAD" then
@@ -190,6 +386,29 @@ function M.parse_cmgl(response)
   local messages, current, terminal = {}, nil, false
   local function finish_record()
     if not current then return true end
+    if current.kind == "pdu" then
+      if #current.body_lines == 0 then return nil, "missing CMGL PDU body" end
+      local pdu = table.concat(current.body_lines)
+      if not M.pdu_matches_length(pdu, current.fields[4]) then
+        return nil, "CMGL PDU length mismatch"
+      end
+      local numeric_status = tonumber(current.fields[2])
+      if numeric_status == 0 or numeric_status == 1 then
+        local decoded, decode_err = M.decode_sms_pdu(pdu)
+        if not decoded then return nil, decode_err end
+        if decoded.kind == "incoming" then
+          messages[#messages + 1] = {
+            index = assert(tonumber(current.fields[1])),
+            status = numeric_status == 0 and "REC UNREAD" or "REC READ",
+            sender = decoded.sender,
+            timestamp = decoded.timestamp,
+            body = decoded.body
+          }
+        end
+      end
+      current = nil
+      return true
+    end
     if current.kind ~= "incoming" then current = nil return true end
     if #current.body_lines == 0 then return nil, "missing CMGL incoming body" end
     local sender, sender_err = decode_text(current.fields[3])

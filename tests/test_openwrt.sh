@@ -84,7 +84,7 @@ assert_eq "$(mode_of "$ROOT/src/usr/sbin/sms2telegram")" "755" "daemon mode"
 guide="$ROOT/src/usr/share/doc/sms2telegram/README.zh-CN.md"
 [ -f "$guide" ] || fail "Chinese operations guide is missing"
 for command in \
-    "opkg install /tmp/sms2telegram_1.0.1_all.ipk" \
+    "opkg install /tmp/sms2telegram_1.0.2_all.ipk" \
     "uci set sms2telegram.main.bot_token='123456:replace_with_real_token'" \
     "uci set sms2telegram.main.chat_id='-1001234567890'" \
     "uci commit sms2telegram" \

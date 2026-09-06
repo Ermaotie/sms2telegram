@@ -5,6 +5,7 @@
 ## 功能
 
 - Telegram 消息以短信正文开头，发件号码和时间放在正文之后。
+- 使用带长度和编码标识的 PDU 模式读取，避免把正文中的 `OK` 或纯数字误判为协议数据。
 - 只处理入站短信，不转发发件箱记录和短信状态报告。
 - 每次发送（包括长短信的每一段）都检查网络出口，仅允许 `eth0`。
 - 明确禁止使用 4G 模块的 RNDIS/SIM 数据接口 `eth2`。
@@ -29,19 +30,19 @@
 
 从 [Releases](https://github.com/Ermaotie/sms2telegram/releases) 下载：
 
-- `sms2telegram_1.0.1_all.ipk`
-- `sms2telegram_1.0.1_all.ipk.sha256`
+- `sms2telegram_1.0.2_all.ipk`
+- `sms2telegram_1.0.2_all.ipk.sha256`
 
 可在电脑上校验文件：
 
 ```sh
-shasum -a 256 -c sms2telegram_1.0.1_all.ipk.sha256
+shasum -a 256 -c sms2telegram_1.0.2_all.ipk.sha256
 ```
 
 Linux/OpenWrt 也可使用：
 
 ```sh
-sha256sum -c sms2telegram_1.0.1_all.ipk.sha256
+sha256sum -c sms2telegram_1.0.2_all.ipk.sha256
 ```
 
 ## 安装
@@ -49,7 +50,7 @@ sha256sum -c sms2telegram_1.0.1_all.ipk.sha256
 先把 IPK 上传到路由器 `/tmp`，然后执行：
 
 ```sh
-opkg install /tmp/sms2telegram_1.0.1_all.ipk
+opkg install /tmp/sms2telegram_1.0.2_all.ipk
 ```
 
 软件包会安装以下依赖：

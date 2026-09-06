@@ -54,8 +54,7 @@ function Client:initialize()
     "AT",
     "ATE0",
     "AT+CMEE=2",
-    "AT+CMGF=1",
-    'AT+CSCS="UCS2"',
+    "AT+CMGF=0",
     'AT+CPMS="' .. self.storage .. '","' .. self.storage .. '","' .. self.storage .. '"',
     "AT+CNMI=2,1,0,0,0"
   }
@@ -67,14 +66,16 @@ function Client:initialize()
 end
 
 function Client:scan()
-  local response, err = self:command('AT+CMGL="ALL"')
+  local response, err = self:command("AT+CMGL=4")
   if not response then return nil, err end
   return self.core.parse_cmgl(response)
 end
 
 function Client:delete(index)
   index = tostring(index)
-  if not index:match("^[1-9][0-9]*$") then return nil, "invalid SMS index" end
+  if index ~= "0" and not index:match("^[1-9][0-9]*$") then
+    return nil, "invalid SMS index"
+  end
   local result, err = self:command("AT+CMGD=" .. index)
   if not result then return nil, err end
   return true
@@ -200,6 +201,7 @@ function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode, core)
   local lines = {}
   local deadline = now_ms(self.nixio) + timeout_ms
   local ambiguous_cmgl = false
+  local candidate_frame
   local function allowed_prefix(line)
     for _, prefix in ipairs(allowed_prefixes or {}) do
       if line:sub(1, #prefix) == prefix then return true end
@@ -210,25 +212,39 @@ function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode, core)
     return normalize_frame(table.concat(lines, "\r\n") .. "\r\n")
   end
   local function complete_cmgl()
-    local record, saw_header
+    local record, saw_header, exact = nil, false, true
+    local function record_complete()
+      if not record then return true end
+      if record.kind == "report" then return true end
+      if record.kind == "pdu" then
+        return core.pdu_matches_length(table.concat(record.body_lines), record.fields[4])
+      end
+      exact = false
+      return record.has_body
+    end
     for _, line in ipairs(lines) do
       local header = line:match("^%+CMGL:%s*(.*)$")
       if header then
-        if record and record.kind ~= "report" and not record.has_body then return false end
-        local kind = core.cmgl_record_type(header)
+        if not record_complete() then return false, exact end
+        local kind, fields = core.cmgl_record_type(header)
         if not kind then return false end
         saw_header = true
-        record = { kind = kind, has_body = false }
+        record = { kind = kind, fields = fields, has_body = false, body_lines = {} }
       elseif not saw_header then
         if line ~= "" then return false end
       else
         record.has_body = true
-        if line ~= "" and (#line % 4 ~= 0 or line:find("[^0-9A-Fa-f]")) then
-          return false
+        record.body_lines[#record.body_lines + 1] = line
+        if line ~= "" then
+          local is_ucs2 = #line % 4 == 0 and not line:find("[^0-9A-Fa-f]")
+          if not is_ucs2 then
+            local valid_utf8 = pcall(core.utf8_length, line)
+            if not valid_utf8 then return false end
+          end
         end
       end
     end
-    return not record or record.kind == "report" or record.has_body
+    return record_complete(), exact
   end
   while true do
     local line = pop_line(self)
@@ -241,20 +257,37 @@ function Transport:read_result(timeout_ms, allowed_prefixes, cmgl_mode, core)
           return nil, "unexpected URC in AT response: " .. line
         end
         if is_terminal(line) then
-          if not cmgl_mode or line ~= "OK" or complete_cmgl() then
+          if not cmgl_mode or line ~= "OK" then
             lines[#lines + 1] = line
             return complete_frame()
+          else
+            local complete, exact = complete_cmgl()
+            lines[#lines + 1] = line
+            if complete and exact then return complete_frame() end
+            if complete then
+              candidate_frame = complete_frame()
+            else
+              candidate_frame = nil
+              ambiguous_cmgl = true
+            end
           end
-          ambiguous_cmgl = true
+        else
+          if line ~= "" then candidate_frame = nil end
+          lines[#lines + 1] = line
         end
-        lines[#lines + 1] = line
       end
     else
-      local remaining = deadline - now_ms(self.nixio)
-      if remaining <= 0 then return nil, "timeout" end
+      local now = now_ms(self.nixio)
+      local remaining = deadline - now
+      if remaining <= 0 then
+        if candidate_frame and self.buffer == "" then return candidate_frame end
+        if ambiguous_cmgl then return nil, "ambiguous CMGL response" end
+        return nil, "timeout"
+      end
       local ready, err = self:poll_read(remaining)
       if ready == nil then return nil, err end
       if not ready then
+        if candidate_frame and self.buffer == "" then return candidate_frame end
         if ambiguous_cmgl then return nil, "ambiguous CMGL response" end
         return nil, "timeout"
       end

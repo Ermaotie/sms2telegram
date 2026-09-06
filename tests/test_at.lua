@@ -27,19 +27,19 @@ local cmgl = table.concat({
   'hello', 'OK', ''
 }, "\r\n")
 
-local init_responses = { "OK\r\n", "OK\r\n", "OK\r\n", "OK\r\n", "OK\r\n", "OK\r\n", "OK\r\n" }
+local init_responses = { "OK\r\n", "OK\r\n", "OK\r\n", "OK\r\n", "OK\r\n", "OK\r\n" }
 local fake = fake_transport(init_responses)
 local client = at.Client.new(fake, core, { storage = "SM", timeout_ms = 3000 })
 local ok, err = client:initialize()
 t.eq("AT init succeeds", ok, true)
 t.eq("AT init sequence", table.concat(fake.commands, "|"),
-  'AT|ATE0|AT+CMEE=2|AT+CMGF=1|AT+CSCS="UCS2"|AT+CPMS="SM","SM","SM"|AT+CNMI=2,1,0,0,0')
+  'AT|ATE0|AT+CMEE=2|AT+CMGF=0|AT+CPMS="SM","SM","SM"|AT+CNMI=2,1,0,0,0')
 
 local scan_fake = fake_transport({ cmgl, "OK\r\n" })
 local scan_client = at.Client.new(scan_fake, core, { timeout_ms = 3000 })
 t.eq("scan command", assert(scan_client:scan())[1].index, 7)
 t.eq("delete success", scan_client:delete(7), true)
-t.eq("scan sends CMGL", scan_fake.commands[1], 'AT+CMGL="ALL"')
+t.eq("scan sends PDU CMGL", scan_fake.commands[1], "AT+CMGL=4")
 t.eq("delete sends CMGD", scan_fake.commands[2], "AT+CMGD=7")
 
 local timeout_client = at.Client.new(fake_transport({ { nil, "timeout" } }), core, {})
@@ -62,10 +62,11 @@ local malformed_value, malformed_err = malformed_client:scan()
 t.eq("malformed CMGL result", malformed_value, nil)
 t.truthy("malformed CMGL error", malformed_err and malformed_err:match("CMGL"))
 
+local zero_delete_transport = fake_transport({ "OK\r\n" })
+local zero_delete = at.Client.new(zero_delete_transport, core, {})
+t.eq("delete index zero succeeds", zero_delete:delete(0), true)
+t.eq("delete index zero command", zero_delete_transport.commands[1], "AT+CMGD=0")
 local invalid_delete = at.Client.new(fake_transport(), core, {})
-local zero_value, zero_err = invalid_delete:delete(0)
-t.eq("delete zero result", zero_value, nil)
-t.truthy("delete zero error", zero_err and zero_err:match("index"))
 local nondigit_value, nondigit_err = invalid_delete:delete("7;AT")
 t.eq("delete nondigit result", nondigit_value, nil)
 t.truthy("delete nondigit error", nondigit_err and nondigit_err:match("index"))
@@ -305,12 +306,14 @@ local raw_cmgl_transport, restore_raw_cmgl = real_transport_with_chunks({
   '+CMGL: 8,"REC READ","+8613800000000",,"26/09/05,14:31:00+32"',
   "first line", "OK", ""
 }, "\r\n") },
-  { at = 30, data = table.concat({ "last line", "OK", "" }, "\r\n") }
+  { at = 150, data = table.concat({ "last line", "OK", "" }, "\r\n") }
 })
-local raw_cmgl_client = at.Client.new(raw_cmgl_transport, core, { timeout_ms = 100 })
+local raw_cmgl_client = at.Client.new(raw_cmgl_transport, core, { timeout_ms = 300 })
 local raw_cmgl_messages, raw_cmgl_err = raw_cmgl_client:scan()
-t.eq("delayed raw CMGL has no messages", tostring(raw_cmgl_messages == nil), "true")
-t.eq("delayed raw CMGL is ambiguous", tostring(not not (raw_cmgl_err and raw_cmgl_err:match("ambiguous"))), "true")
+t.eq("delayed raw CMGL completes", raw_cmgl_messages and #raw_cmgl_messages, 1)
+t.eq("delayed raw CMGL preserves body OK line", raw_cmgl_messages and raw_cmgl_messages[1].body,
+  "first line\nOK\nlast line")
+t.eq("delayed raw CMGL has no error", raw_cmgl_err, nil)
 restore_raw_cmgl()
 
 local header_only_transport, restore_header_only = real_transport_with_chunks({
@@ -321,9 +324,33 @@ local header_only_transport, restore_header_only = real_transport_with_chunks({
 })
 local header_only_client = at.Client.new(header_only_transport, core, { timeout_ms = 100 })
 local header_only_messages, header_only_err = header_only_client:scan()
-t.eq("header-only CMGL has no messages", tostring(header_only_messages == nil), "true")
-t.eq("header-only CMGL is ambiguous", tostring(not not (header_only_err and header_only_err:match("ambiguous"))), "true")
+t.eq("body beginning with OK completes", header_only_messages and #header_only_messages, 1)
+t.eq("body beginning with OK is preserved", header_only_messages and header_only_messages[1].body,
+  "OK\nraw body")
+t.eq("body beginning with OK has no error", header_only_err, nil)
 restore_header_only()
+
+local partial_after_ok_transport, restore_partial_after_ok = real_transport_with_chunks({
+  { at = 0, data = table.concat({
+    '+CMGL: 10,"REC READ","+8613800000000",,"26/09/05,14:33:00+32"', "first line", "OK", ""
+  }, "\r\n") },
+  { at = 150, data = "unfinished" }
+})
+local partial_after_ok_client = at.Client.new(partial_after_ok_transport, core, { timeout_ms = 300 })
+local partial_after_ok_messages, partial_after_ok_err = partial_after_ok_client:scan()
+t.eq("partial data after candidate has no messages", partial_after_ok_messages, nil)
+t.truthy("partial data after candidate is rejected", partial_after_ok_err)
+restore_partial_after_ok()
+
+local pdu_transport, restore_pdu = real_transport_with_chunks({ table.concat({
+  "+CMGL: 0,1,,24",
+  "0891683108200105F0240D91683161450179F900082180904121102304611F8C22",
+  "OK", ""
+}, "\r\n") })
+local pdu_client = at.Client.new(pdu_transport, core, { timeout_ms = 300 })
+local pdu_messages = assert(pdu_client:scan())
+t.eq("serial PDU CMGL decodes body", pdu_messages[1].body, "感谢")
+restore_pdu()
 
 local encoded_transport, restore_encoded = real_transport_with_chunks({ table.concat({
   '+CMGL: 8,"REC READ","+8613800000000",,"26/09/05,14:31:00+32"',
@@ -331,7 +358,7 @@ local encoded_transport, restore_encoded = real_transport_with_chunks({ table.co
 }, "\r\n") })
 local encoded_client = at.Client.new(encoded_transport, core, { timeout_ms = 100 })
 local encoded_messages = assert(encoded_client:scan())
-t.eq("serial CMGL accepts UCS2 body", encoded_messages[1].body, "OK")
+t.eq("serial legacy CMGL preserves hex-looking body", encoded_messages[1].body, "004F004B")
 restore_encoded()
 
 local empty_transport, restore_empty = real_transport_with_chunks({ table.concat({
@@ -362,7 +389,7 @@ local leading_cmgl_transport, restore_leading_cmgl = real_transport_with_chunks(
 local leading_cmgl_client = at.Client.new(leading_cmgl_transport, core, { timeout_ms = 100 })
 local leading_cmgl_ok, leading_cmgl_messages = pcall(leading_cmgl_client.scan, leading_cmgl_client)
 t.eq("leading CRLF CMGL scan does not throw", tostring(leading_cmgl_ok), "true")
-t.eq("leading CRLF CMGL body", leading_cmgl_ok and leading_cmgl_messages[1].body or "error", "OK")
+t.eq("leading CRLF CMGL body", leading_cmgl_ok and leading_cmgl_messages[1].body or "error", "004F004B")
 restore_leading_cmgl()
 
 local urc_transport, restore_urc = real_transport_with_chunks({ table.concat({

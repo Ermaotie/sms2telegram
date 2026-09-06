@@ -32,11 +32,85 @@ local messages = assert(core.parse_cmgl(response))
 t.eq("one CMGL record", #messages, 1)
 t.eq("CMGL index", messages[1].index, 7)
 t.eq("decoded sender", messages[1].sender, "+8613800000000")
-t.eq("decoded multiline body", messages[1].body, "短信\n第二行")
+t.eq("legacy text body is not guessed as UCS2", messages[1].body,
+  "77ED4FE1000A7B2C4E8C884C")
+
+local live_response = table.concat({
+  '+CMGL: 0,"REC READ","002B0038003600310033003800300030003000300030003000300030",,"26/09/06,21:05:00 +32"',
+  'OpenWrt live SMS body',
+  'OK',
+  ''
+}, '\r\n')
+local live_messages = assert(core.parse_cmgl(live_response))
+t.eq("live Air780 accepts SMS index zero", live_messages[1].index, 0)
+t.eq("live Air780 header with timezone space", live_messages[1].timestamp, "26/09/06,21:05:00 +32")
+t.eq("live Air780 raw UTF-8 body", live_messages[1].body, "OpenWrt live SMS body")
+
+local invalid_utf8_response = table.concat({
+  '+CMGL: 10,"REC READ","+8613800000000",,"26/09/06,21:06:00 +32"',
+  string.char(0xff),
+  'OK',
+  ''
+}, '\r\n')
+local invalid_utf8_messages, invalid_utf8_err = core.parse_cmgl(invalid_utf8_response)
+t.eq("invalid raw UTF-8 CMGL body rejected", invalid_utf8_messages, nil)
+t.truthy("invalid raw UTF-8 CMGL body error", invalid_utf8_err and invalid_utf8_err:match("UTF%-8"))
+
+local pdu_ucs2_response = table.concat({
+  "+CMGL: 0,1,,24",
+  "0891683108200105F0240D91683161450179F900082180904121102304611F8C22",
+  "OK",
+  ""
+}, "\r\n")
+local pdu_ucs2_messages = assert(core.parse_cmgl(pdu_ucs2_response))
+t.eq("PDU UCS2 message count", #pdu_ucs2_messages, 1)
+t.eq("PDU accepts index zero", pdu_ucs2_messages[1].index, 0)
+t.eq("PDU decodes sender", pdu_ucs2_messages[1].sender, "+8613165410979")
+t.eq("PDU decodes timestamp", pdu_ucs2_messages[1].timestamp, "12/08/09,14:12:01+32")
+t.eq("PDU decodes UCS2 body", pdu_ucs2_messages[1].body, "感谢")
+
+local pdu_gsm7_response = table.concat({
+  "+CMGL: 1,0,,20",
+  "00000491214300006290601250002305E8329BFD06",
+  "OK",
+  ""
+}, "\r\n")
+local pdu_gsm7_messages = assert(core.parse_cmgl(pdu_gsm7_response))
+t.eq("PDU decodes GSM7 body", pdu_gsm7_messages[1].body, "hello")
+t.eq("PDU unread status", pdu_gsm7_messages[1].status, "REC UNREAD")
+
+local pdu_alpha_response = table.concat({
+  "+CMGL: 2,1,,22",
+  "000007D049A7F10900006290601250002305E8329BFD06",
+  "OK",
+  ""
+}, "\r\n")
+local pdu_alpha_messages = assert(core.parse_cmgl(pdu_alpha_response))
+t.eq("PDU decodes alphanumeric sender", pdu_alpha_messages[1].sender, "INFO")
+t.eq("PDU with alphanumeric sender keeps body alignment", pdu_alpha_messages[1].body, "hello")
+
+local pdu_mwi_ucs2_response = table.concat({
+  "+CMGL: 3,1,,17",
+  "00000491214300E062906012500023020041",
+  "OK",
+  ""
+}, "\r\n")
+local pdu_mwi_ucs2_messages = assert(core.parse_cmgl(pdu_mwi_ucs2_response))
+t.eq("PDU MWI UCS2 coding group", pdu_mwi_ucs2_messages[1].body, "A")
+
+local numeric_text_response = table.concat({
+  '+CMGL: 2,"REC READ","+8613800000000",,"26/09/06,21:06:00 +32"',
+  "2026",
+  "OK",
+  ""
+}, "\r\n")
+t.eq("legacy text preserves hex-looking UTF-8", assert(core.parse_cmgl(numeric_text_response))[1].body,
+  "2026")
 
 local parts = core.format_parts(messages[1], 4096)
 t.eq("short SMS one part", #parts, 1)
-t.eq("body precedes metadata", parts[1], "短信\n第二行\n\n📩 短信信息\n来自：+8613800000000\n时间：26/09/05,14:30:00+32")
+t.eq("body precedes metadata", parts[1],
+  "77ED4FE1000A7B2C4E8C884C\n\n📩 短信信息\n来自：+8613800000000\n时间：26/09/05,14:30:00+32")
 t.eq("route eth0", core.route_device("1.1.1.1 via 192.168.1.1 dev eth0 src 192.168.1.2\n"), "eth0")
 t.eq("route eth2", core.route_device("1.1.1.1 dev eth2 src 10.0.0.2\n"), "eth2")
 t.eq("missing route", core.route_device("RTNETLINK answers: Network unreachable\n"), nil)
@@ -90,7 +164,8 @@ local mixed_response = table.concat({
 local mixed_messages = core.parse_cmgl(mixed_response)
 t.eq("mixed CMGL returns incoming deliveries only", mixed_messages and #mixed_messages, 2)
 t.eq("mixed CMGL preserves incoming index", mixed_messages and mixed_messages[1].index, 4)
-t.eq("mixed CMGL decodes incoming body", mixed_messages and mixed_messages[1].body, "OK")
+t.eq("mixed CMGL preserves legacy hex-looking body", mixed_messages and mixed_messages[1].body,
+  "004F004B")
 t.eq("mixed CMGL preserves explicit blank incoming body", mixed_messages and mixed_messages[2] and mixed_messages[2].body, "")
 local missing_body = '+CMGL: 6,"REC READ","+8613800000000",,"26/09/05,14:32:00+32"\r\nOK\r\n'
 t.eq("incoming header without body is rejected", core.parse_cmgl(missing_body), nil)

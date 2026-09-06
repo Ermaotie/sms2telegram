@@ -1,5 +1,5 @@
 Package: sms2telegram
-Version: 1.0.1
+Version: 1.0.2
 Architecture: all
 Maintainer: Local Administrator
 Depends: lua, luci-lib-nixio, coreutils-stty, curl, ca-bundle, jsonfilter
