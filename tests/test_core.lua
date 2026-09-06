@@ -89,6 +89,53 @@ local pdu_alpha_messages = assert(core.parse_cmgl(pdu_alpha_response))
 t.eq("PDU decodes alphanumeric sender", pdu_alpha_messages[1].sender, "INFO")
 t.eq("PDU with alphanumeric sender keeps body alignment", pdu_alpha_messages[1].body, "hello")
 
+local pdu_shifted_fallback_response = table.concat({
+  "+CMGL: 4,1,,37",
+  "000407D049A7F1096A00623110210000231620FBAECB41ECF739ED068DDFE4B20E1493CD6835",
+  "OK",
+  ""
+}, "\r\n")
+local shifted_fallback_messages, shifted_fallback_err = core.parse_cmgl(pdu_shifted_fallback_response)
+t.truthy("PDU with shifted GSM7 body is recovered", shifted_fallback_messages, shifted_fallback_err)
+t.eq("shifted GSM7 fallback keeps sender", shifted_fallback_messages and shifted_fallback_messages[1].sender,
+  "INFO")
+t.eq("shifted GSM7 fallback marks invalid timestamp",
+  shifted_fallback_messages and shifted_fallback_messages[1].timestamp, "未知（原始短信时间异常）")
+t.eq("shifted GSM7 fallback recovers body",
+  shifted_fallback_messages and shifted_fallback_messages[1].body, "Your login code: 12345")
+
+local pdu_low_confidence_fallback_response = table.concat({
+  "+CMGL: 5,1,,23",
+  "000407D049A7F109000062311021000023068542A1502800",
+  "OK",
+  ""
+}, "\r\n")
+local low_confidence_messages, low_confidence_err = core.parse_cmgl(pdu_low_confidence_fallback_response)
+t.eq("low-confidence shifted GSM7 stays on SIM", low_confidence_messages, nil)
+t.truthy("low-confidence shifted GSM7 reports timestamp error",
+  low_confidence_err and low_confidence_err:match("timestamp"))
+
+local pdu_udhi_fallback_response = table.concat({
+  "+CMGL: 6,1,,37",
+  "004407D049A7F1096A00623110210000231620FBAECB41ECF739ED068DDFE4B20E1493CD6835",
+  "OK",
+  ""
+}, "\r\n")
+local udhi_fallback_messages, udhi_fallback_err = core.parse_cmgl(pdu_udhi_fallback_response)
+t.eq("shifted fallback does not guess across UDH", udhi_fallback_messages, nil)
+t.truthy("shifted UDH fallback reports timestamp error",
+  udhi_fallback_err and udhi_fallback_err:match("timestamp"))
+
+local pdu_empty_body_response = table.concat({
+  "+CMGL: 7,1,,17",
+  "000007D049A7F10900006290601250002300",
+  "OK",
+  ""
+}, "\r\n")
+local empty_body_messages, empty_body_err = core.parse_cmgl(pdu_empty_body_response)
+t.eq("PDU with empty body is retained", empty_body_messages, nil)
+t.truthy("PDU empty body reports body error", empty_body_err and empty_body_err:match("body"))
+
 local pdu_mwi_ucs2_response = table.concat({
   "+CMGL: 3,1,,17",
   "00000491214300E062906012500023020041",

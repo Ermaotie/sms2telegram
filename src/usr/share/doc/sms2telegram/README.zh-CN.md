@@ -3,7 +3,9 @@
 本服务从 Air780EPV 读取短信，并通过路由器的 Telegram 连接转发。安装后由
 OpenWrt `procd` 管理并随系统启动。
 
-模块使用 PDU 模式读取短信，以模块返回的 TPDU 长度和 DCS 编码为准，不根据正文外观猜测编码。
+模块使用 PDU 模式读取短信，并优先按 TPDU 长度和 DCS 编码解析。若验证码平台
+产生异常时间戳并伴随 GSM 7-bit 位移，服务会从多个位移中选择可读度最高的正文；
+恢复成功时继续转发，并将时间标为“未知（原始短信时间异常）”。
 
 ## 安装和配置
 
@@ -13,7 +15,7 @@ OpenWrt `procd` 管理并随系统启动。
 在路由器上执行：
 
 ```sh
-opkg install /tmp/sms2telegram_1.0.2_all.ipk
+opkg install /tmp/sms2telegram_1.0.3_all.ipk
 uci set sms2telegram.main.bot_token='123456:replace_with_real_token'
 uci set sms2telegram.main.chat_id='-1001234567890'
 uci commit sms2telegram

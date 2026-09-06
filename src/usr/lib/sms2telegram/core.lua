@@ -195,11 +195,12 @@ local function gsm_char(value)
   return "�"
 end
 
-local function decode_gsm7(bytes, septets, start_septet)
+local function decode_gsm7(bytes, septets, start_septet, bit_offset)
   local out, escaped = {}, false
   start_septet = start_septet or 0
+  bit_offset = bit_offset or 0
   for number = start_septet, start_septet + septets - 1 do
-    local bit = number * 7
+    local bit = bit_offset + number * 7
     local index = math.floor(bit / 8) + 1
     local shift = bit % 8
     if not bytes[index] then return nil, "truncated GSM7 user data" end
@@ -222,9 +223,66 @@ local function decode_gsm7(bytes, septets, start_septet)
   return table.concat(out)
 end
 
+local function decode_shifted_gsm7(bytes, udl)
+  local best, best_score
+  for bit_offset = 0, 6 do
+    local available = math.floor((#bytes * 8 - bit_offset) / 7)
+    local septets = math.min(udl, available)
+    if septets > 0 then
+      local candidate = decode_gsm7(bytes, septets, 0, bit_offset)
+      if candidate then
+        candidate = candidate:gsub("@+$", "")
+        local good, visible, bad = 0, 0, 0
+        for index = 1, #candidate do
+          local byte = candidate:byte(index)
+          if byte == 9 or byte == 10 or byte == 13 or (byte >= 32 and byte <= 126) then
+            good = good + 1
+            if byte >= 33 and byte <= 126 then visible = visible + 1 end
+          else
+            bad = bad + 1
+          end
+        end
+        local otp_like = false
+        for digits in candidate:gmatch("%d+") do
+          if #digits >= 4 and #digits <= 8 then otp_like = true; break end
+        end
+        local has_link = candidate:find("http://", 1, true) or
+          candidate:find("https://", 1, true)
+        local has_words = candidate:match("%a+%s+%a+") ~= nil
+        local score = good - bad * 4
+        if otp_like then score = score + 40 end
+        if has_link then score = score + 20 end
+        if has_words then score = score + 10 end
+        if candidate:find("\n", 1, true) then score = score + 5 end
+        local strong_evidence = has_link or (otp_like and has_words)
+        if strong_evidence and visible >= 4 and good >= bad * 3 and
+            (not best_score or score > best_score) then
+          best, best_score = candidate, score
+        end
+      end
+    end
+  end
+  return best
+end
+
 local function decode_timestamp(bytes, pos)
   for offset = 0, 6 do
     if not bytes[pos + offset] then return nil, "truncated PDU timestamp" end
+  end
+  local function pair_value(byte, signed)
+    local low, high = byte % 16, math.floor(byte / 16)
+    if signed and low >= 8 then low = low - 8 end
+    if low > 9 or high > 9 then return nil end
+    return low * 10 + high
+  end
+  local values = {}
+  for offset = 0, 5 do values[offset + 1] = pair_value(bytes[pos + offset]) end
+  local timezone_value = pair_value(bytes[pos + 6], true)
+  if not values[1] or not values[2] or not values[3] or not values[4] or
+      not values[5] or not values[6] or not timezone_value or
+      values[2] < 1 or values[2] > 12 or values[3] < 1 or values[3] > 31 or
+      values[4] > 23 or values[5] > 59 or values[6] > 59 or timezone_value > 96 then
+    return nil, "invalid PDU timestamp"
   end
   local function pair(byte) return string.format("%X%X", byte % 16, math.floor(byte / 16)) end
   local timezone = bytes[pos + 6]
@@ -299,7 +357,6 @@ function M.decode_sms_pdu(pdu)
   local dcs = bytes[pos + 1]
   pos = pos + 2
   local timestamp, timestamp_err = decode_timestamp(bytes, pos)
-  if not timestamp then return nil, timestamp_err end
   pos = pos + 7
   local udl = bytes[pos]
   if not udl then return nil, "missing PDU user data length" end
@@ -309,6 +366,16 @@ function M.decode_sms_pdu(pdu)
 
   local alphabet, alphabet_err = pdu_alphabet(dcs)
   if alphabet == nil then return nil, alphabet_err end
+  if not timestamp then
+    local recovered = not udhi and alphabet == 0 and decode_shifted_gsm7(user_data, udl) or nil
+    if recovered and recovered ~= "" then
+      return {
+        kind = "incoming", sender = sender,
+        timestamp = "未知（原始短信时间异常）", body = recovered
+      }
+    end
+    return nil, timestamp_err
+  end
   local body
   if alphabet == 0 then
     if #user_data ~= math.ceil(udl * 7 / 8) then return nil, "GSM7 user data length mismatch" end
@@ -335,7 +402,7 @@ function M.decode_sms_pdu(pdu)
   else
     return nil, "unsupported PDU data coding scheme"
   end
-  if not body then return nil, "invalid PDU user data" end
+  if not body or body == "" then return nil, "invalid or empty PDU body" end
   return { kind = "incoming", sender = sender, timestamp = timestamp, body = body }
 end
 
