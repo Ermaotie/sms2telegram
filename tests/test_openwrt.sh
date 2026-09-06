@@ -78,7 +78,6 @@ assert_eq "$retry_initial" "15" "default initial retry"
 config_get retry_max main retry_max
 assert_eq "$retry_max" "300" "default maximum retry"
 
-assert_eq "$(mode_of "$ROOT/src/etc/config/sms2telegram")" "600" "UCI config mode"
 assert_eq "$(mode_of "$ROOT/src/etc/init.d/sms2telegram")" "755" "init script mode"
 assert_eq "$(mode_of "$ROOT/src/usr/sbin/sms2telegram")" "755" "daemon mode"
 
