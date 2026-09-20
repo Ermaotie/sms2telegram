@@ -12,6 +12,11 @@ end
 local function fixture(options)
   options = options or {}
   local events, records = {}, options.records or {}
+  local order = options.order or {}
+  if #order == 0 then
+    for index in pairs(records) do order[#order + 1] = tostring(index) end
+    table.sort(order, function(left, right) return tonumber(left) < tonumber(right) end)
+  end
   local messages = options.messages or { message(7) }
   local deps = {
     core = {
@@ -53,14 +58,32 @@ local function fixture(options)
       contains = function(_, index, digest) return records[tostring(index)] == digest end,
       add = function(_, index, digest)
         events[#events + 1] = "ledger-add"
-        records[tostring(index)] = digest
+        index = tostring(index)
+        for position = #order, 1, -1 do
+          if order[position] == index then table.remove(order, position) end
+        end
+        records[index] = digest
+        order[#order + 1] = index
         return true
       end,
       remove = function(_, index, digest)
         events[#events + 1] = "ledger-remove"
         if records[tostring(index)] ~= digest then return nil, "missing record" end
-        records[tostring(index)] = nil
+        index = tostring(index)
+        records[index] = nil
+        for position = #order, 1, -1 do
+          if order[position] == index then table.remove(order, position) end
+        end
         return true
+      end,
+      ordered_matching = function(_, candidates)
+        local matching = {}
+        for _, index in ipairs(order) do
+          if records[index] and candidates[index] == records[index] then
+            matching[#matching + 1] = { index = index, digest = records[index] }
+          end
+        end
+        return matching
       end,
       save_atomic = function()
         events[#events + 1] = "ledger-save"
@@ -79,7 +102,8 @@ end
 local function cycle(options, config)
   local deps, events, records = fixture(options)
   local instance = worker.new(deps, config or {
-    bot_token = "token", chat_id = "chat", allowed_wan_device = "eth0", telegram_limit = 4096
+    bot_token = "token", chat_id = "chat", allowed_wan_device = "eth0",
+    telegram_limit = 4096, retain_count = 3
   })
   local ok, err, at_failed = instance:cycle()
   return ok, err, events, records, at_failed
@@ -109,7 +133,24 @@ local success_ok, success_err, events = cycle()
 t.eq("successful delivery result", success_ok, true)
 t.eq("successful delivery error", success_err, nil)
 t.eq("delivery order", table.concat(events, ","),
+  "scan,route,send,ledger-add,ledger-save")
+
+local zero_ok, zero_err, zero_events, zero_records = cycle({}, {
+  bot_token = "token", chat_id = "chat", allowed_wan_device = "eth0",
+  telegram_limit = 4096, retain_count = 0
+})
+t.eq("zero retention delivery result", zero_ok, true)
+t.eq("zero retention delivery error", zero_err, nil)
+t.eq("zero retention deletes after confirmation", table.concat(zero_events, ","),
   "scan,route,send,ledger-add,ledger-save,delete,ledger-remove,ledger-save")
+t.eq("zero retention clears confirmation", zero_records["7"], nil)
+
+local invalid_retain_ok, invalid_retain_err, invalid_retain_events = cycle({}, {
+  bot_token = "token", chat_id = "chat", allowed_wan_device = "eth0", retain_count = -1
+})
+t.eq("invalid retention result", invalid_retain_ok, nil)
+t.eq("invalid retention category", invalid_retain_err, "config")
+t.eq("invalid retention has zero operations", #invalid_retain_events, 0)
 
 local multipart_ok, multipart_err, multipart_events, multipart_records = cycle({
   parts = { "first", "second" }, routes = { "eth0", "eth2" }
@@ -134,34 +175,21 @@ local incoming_only = assert(real_core.parse_cmgl(table.concat({
 local incoming_ok, _, incoming_events = cycle({ messages = incoming_only })
 t.eq("mixed records deliver successfully", incoming_ok, true)
 t.eq("outgoing and report have no worker send or delete", table.concat(incoming_events, ","),
-  "scan,route,send,ledger-add,ledger-save,delete,ledger-remove,ledger-save")
-
--- Removing a confirmation after a failed delete would cause a duplicate send.
-local delete_ok, delete_err, delete_events, delete_records = cycle({ delete_fails = true })
-t.eq("delete failure result", delete_ok, nil)
-t.eq("delete failure category", delete_err, "at")
-t.eq("delete failure keeps confirmation", delete_records["7"], digest_a)
-t.eq("delete failure order", table.concat(delete_events, ","), "scan,route,send,ledger-add,ledger-save,delete")
+  "scan,route,send,ledger-add,ledger-save")
 
 local recover_ok, recover_err, recover_events, recover_records = cycle({ records = { ["7"] = digest_a } })
-t.eq("matching ledger cleanup result", recover_ok, true)
-t.eq("matching ledger cleanup error", recover_err, nil)
-t.eq("matching ledger skips Telegram", table.concat(recover_events, ","), "scan,delete,ledger-remove,ledger-save")
-t.eq("matching ledger cleanup removes record", recover_records["7"], nil)
+t.eq("matching retained result", recover_ok, true)
+t.eq("matching retained error", recover_err, nil)
+t.eq("matching retained skips Telegram and delete", table.concat(recover_events, ","), "scan")
+t.eq("matching retained keeps record", recover_records["7"], digest_a)
 
 local reuse_ok, reuse_err, reuse_events = cycle({ records = { ["7"] = digest_a }, messages = { message(7, "changed") } })
 t.eq("reused index result", reuse_ok, true)
 t.eq("reused index error", reuse_err, nil)
 t.eq("reused index sends new fingerprint", table.concat(reuse_events, ","),
-  "scan,route,send,ledger-add,ledger-save,delete,ledger-remove,ledger-save")
+  "scan,route,send,ledger-add,ledger-save")
 
-local cleanup_ok, cleanup_err, cleanup_events, cleanup_records = cycle({ records = { ["7"] = digest_a } })
-t.eq("successful delete cleanup result", cleanup_ok, true)
-t.eq("successful delete cleanup error", cleanup_err, nil)
-t.eq("successful delete cleanup order", table.concat(cleanup_events, ","), "scan,delete,ledger-remove,ledger-save")
-t.eq("successful delete removes ledger entry", cleanup_records["7"], nil)
-
--- A send failure must not undo independent cleanup of an already-confirmed record.
+-- A send failure must not remove any of the three retained confirmations.
 local mixed_ok, mixed_err, mixed_events, mixed_records = cycle({
   send_fails = true,
   records = { ["7"] = digest_a },
@@ -169,11 +197,11 @@ local mixed_ok, mixed_err, mixed_events, mixed_records = cycle({
 })
 t.eq("mixed messages result", mixed_ok, nil)
 t.eq("mixed messages category", mixed_err, "telegram")
-t.eq("mixed messages order", table.concat(mixed_events, ","), "scan,delete,ledger-remove,ledger-save,route,send")
+t.eq("mixed messages order", table.concat(mixed_events, ","), "scan,route,send")
 t.eq("mixed failed new record not confirmed", mixed_records["8"], nil)
-t.eq("mixed confirmed record cleaned", mixed_records["7"], nil)
+t.eq("mixed confirmed record retained", mixed_records["7"], digest_a)
 
--- Returning at the first failed new record would strand later confirmed records.
+-- A failed new record does not disturb later retained records.
 local reverse_ok, reverse_err, reverse_events, reverse_records = cycle({
   send_fails = true,
   records = { ["8"] = digest_a },
@@ -181,25 +209,39 @@ local reverse_ok, reverse_err, reverse_events, reverse_records = cycle({
 })
 t.eq("reverse mixed result", reverse_ok, nil)
 t.eq("reverse mixed category", reverse_err, "telegram")
-t.eq("reverse mixed cleans only later confirmation", table.concat(reverse_events, ","),
-  "scan,route,send,delete,ledger-remove,ledger-save")
+t.eq("reverse mixed leaves later confirmation retained", table.concat(reverse_events, ","),
+  "scan,route,send")
 t.eq("reverse failed new record is not confirmed", reverse_records["7"], nil)
-t.eq("reverse later confirmation is removed", tostring(reverse_records["8"]), "nil")
+t.eq("reverse later confirmation is retained", tostring(reverse_records["8"]), digest_a)
 t.eq("reverse later new record is not sent", reverse_records["9"], nil)
 
--- Once a delete loses AT synchronization, no later delete may touch that serial session.
-local at_stop_ok, at_stop_err, at_stop_events, at_stop_records, at_stop_failed = cycle({
-  send_fails = true,
-  delete_fails_at = 8,
-  records = { ["8"] = digest_a, ["9"] = digest_a },
-  messages = { message(7, "new"), message(8), message(9) }
+-- The fourth confirmed SMS prunes the oldest one, never one chosen by slot number.
+local prune_ok, prune_err, prune_events, prune_records = cycle({
+  records = { ["8"] = digest_a, ["9"] = digest_a, ["2"] = digest_a },
+  order = { "8", "9", "2" },
+  messages = { message(8), message(9), message(2), message(1, "changed") }
 })
-t.eq("AT stop preserves primary Telegram error", at_stop_ok, nil)
-t.eq("AT stop primary category", at_stop_err, "telegram")
+t.eq("fourth SMS delivery succeeds", prune_ok, true)
+t.eq("fourth SMS delivery error", prune_err, nil)
+t.eq("fourth SMS sends then deletes oldest", table.concat(prune_events, ","),
+  "scan,route,send,ledger-add,ledger-save,delete,ledger-remove,ledger-save")
+t.eq("oldest retained record removed", prune_records["8"], nil)
+t.eq("new reused low slot retained", prune_records["1"], digest_b)
+
+-- Once a pruning delete loses AT synchronization, no later delete may touch that serial session.
+local at_stop_ok, at_stop_err, at_stop_events, at_stop_records, at_stop_failed = cycle({
+  delete_fails_at = "8",
+  records = { ["8"] = digest_a, ["9"] = digest_a, ["2"] = digest_a },
+  order = { "8", "9", "2" },
+  messages = { message(8), message(9), message(2), message(1, "changed") }
+})
+t.eq("AT stop result", at_stop_ok, nil)
+t.eq("AT stop category", at_stop_err, "at")
 t.eq("AT stop reports reconnect signal", tostring(at_stop_failed), "true")
-t.eq("AT stop has no later serial delete", table.concat(at_stop_events, ","), "scan,route,send,delete")
-t.eq("AT stop keeps failed confirmation", at_stop_records["8"], digest_a)
-t.eq("AT stop keeps later confirmation", tostring(at_stop_records["9"]), digest_a)
+t.eq("AT stop has no later serial delete", table.concat(at_stop_events, ","),
+  "scan,route,send,ledger-add,ledger-save,delete")
+t.eq("AT stop keeps failed oldest confirmation", at_stop_records["8"], digest_a)
+t.eq("AT stop keeps new confirmation", at_stop_records["1"], digest_b)
 
 local function quote(value)
   return "'" .. value:gsub("'", "'\"'\"'") .. "'"
@@ -287,7 +329,7 @@ return M
   shell_status("rm -rf " .. quote(temp))
 end
 
--- Replacing the daemon's PID wiring with an empty value makes Sender reject its temporary paths before curl.
+-- A delivered SMS is retained across daemon restarts without being sent twice.
 do
   local temp = process_temp()
   copy_runtime(temp)
@@ -335,15 +377,15 @@ printf 200
   local at_log, send_log = temp .. "/at.log", temp .. "/send.log"
   local extra = "SMS2TELEGRAM_AT_LOG=" .. quote(at_log) .. " SMS2TELEGRAM_SEND_LOG=" .. quote(send_log) ..
     " SMS2TELEGRAM_LEDGER_PATH=" .. quote(temp .. "/state/delivered")
-  t.eq("first-start sender stays alive after delete failure", run_daemon(temp, extra .. " SMS2TELEGRAM_DELETE_FAILS=1"), 0)
+  t.eq("first-start sender stays alive", run_daemon(temp, extra), 0)
   t.eq("production Sender reaches fake curl", read_file(send_log), "send\n")
-  t.eq("production Sender deletes after fake success", tostring(read_file(at_log):find("delete\n", 1, true) ~= nil), "true")
-  t.truthy("confirmed delete failure survives on disk", read_file(temp .. "/state/delivered"):match("^7\t"))
+  t.eq("one retained SMS is not deleted", read_file(at_log):find("delete\n", 1, true), nil)
+  t.truthy("retained confirmation survives on disk", read_file(temp .. "/state/delivered"):match("^7\t"))
   write_file(at_log, "")
   t.eq("restarted daemon stays alive", run_daemon(temp, extra), 0)
   t.eq("restart recovers without another send", read_file(send_log), "send\n")
-  t.truthy("restart retries only deletion", read_file(at_log):find("delete\n", 1, true))
-  t.eq("restart clears persisted confirmation after deletion", read_file(temp .. "/state/delivered"), "")
+  t.eq("restart keeps retained SMS without deletion", read_file(at_log):find("delete\n", 1, true), nil)
+  t.truthy("restart keeps persisted confirmation", read_file(temp .. "/state/delivered"):match("^7\t"))
   write_file(temp .. "/blocked-parent", "file")
   write_file(send_log, "")
   write_file(at_log, "")

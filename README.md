@@ -12,8 +12,8 @@
 - 每次发送（包括长短信的每一段）都检查网络出口，仅允许 `eth0`。
 - 明确禁止使用 4G 模块的 RNDIS/SIM 数据接口 `eth2`。
 - 请求经过路由器正常网络栈，可使用 OpenClash 等透明代理。
-- 仅在 Telegram 返回成功后删除模块中的短信。
-- 发送确认记录持久化保存，路由器重启后不会因短信删除失败而重复发送。
+- Telegram 成功接收后仍在 SIM 中保留最新 3 条入站短信，第 4 条到来时才删除最旧的一条。
+- 发送确认和保留顺序持久化保存，路由器重启后不会重复转发已缓存短信。
 - 使用 OpenWrt `procd` 管理，安装后自动启用并随路由器启动。
 - Bot Token、Chat ID 和短信正文不会写入系统日志。
 
@@ -32,19 +32,19 @@
 
 从 [Releases](https://github.com/Ermaotie/sms2telegram/releases) 下载：
 
-- `sms2telegram_1.1.0_all.ipk`
-- `sms2telegram_1.1.0_all.ipk.sha256`
+- `sms2telegram_1.1.1_all.ipk`
+- `sms2telegram_1.1.1_all.ipk.sha256`
 
 可在电脑上校验文件：
 
 ```sh
-shasum -a 256 -c sms2telegram_1.1.0_all.ipk.sha256
+shasum -a 256 -c sms2telegram_1.1.1_all.ipk.sha256
 ```
 
 Linux/OpenWrt 也可使用：
 
 ```sh
-sha256sum -c sms2telegram_1.1.0_all.ipk.sha256
+sha256sum -c sms2telegram_1.1.1_all.ipk.sha256
 ```
 
 ## 安装
@@ -52,7 +52,7 @@ sha256sum -c sms2telegram_1.1.0_all.ipk.sha256
 先把 IPK 上传到路由器 `/tmp`，然后执行：
 
 ```sh
-opkg install /tmp/sms2telegram_1.1.0_all.ipk
+opkg install /tmp/sms2telegram_1.1.1_all.ipk
 ```
 
 软件包会安装以下依赖：
@@ -115,7 +115,7 @@ logread -e sms2telegram
 /etc/init.d/sms2telegram stop
 ```
 
-服务由 `procd` 自动拉起。确认记录保存在 `/etc/sms2telegram/delivered`，不会包含短信正文。
+服务由 `procd` 自动拉起。确认记录和缓存顺序保存在 `/etc/sms2telegram/delivered`，不会包含短信正文。
 
 向已配置的 Bot 私聊发送 `/status`，服务会返回当前版本、运行时长、4G 模块连接、
 串口、网络出口及最近一次短信扫描状态。命令只响应配置中的数字 `chat_id`；其他聊天会被忽略。
@@ -129,7 +129,11 @@ allowed_wan_device=eth0
 poll_interval=15
 retry_initial=15
 retry_max=300
+retain_count=3
 ```
+
+`retain_count` 表示成功转发后在 SIM 中保留的最新入站短信数量，默认值为 `3`。
+保留的短信不会重复转发；新短信使数量超过该值时，服务只删除最旧的已确认短信。
 
 如模块使用其他 AT 串口，可修改：
 
@@ -184,7 +188,7 @@ sh scripts/build-ipk.sh
 ## 安全说明
 
 - 路由策略默认拒绝未知或非 `eth0` 出口。
-- Telegram 返回失败时不删除短信。
+- Telegram 返回失败时不删除短信；发送成功后默认保留最新 3 条。
 - 串口异常、解析失败或确认记录不可用时停止发送并保留短信。
 - Telegram 采用至少一次投递策略：在请求已被 Telegram 接收但响应丢失的极端情况下，可能产生重复消息，以避免短信丢失。
 

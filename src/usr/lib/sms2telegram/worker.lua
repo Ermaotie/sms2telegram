@@ -23,31 +23,24 @@ function Worker:cycle()
   local deps, config = self.deps, self.config
   local credentials_ok = deps.delivery.validate_credentials(config.bot_token, config.chat_id)
   if not credentials_ok then return categorized("config") end
+  local retain_count = tonumber(config.retain_count)
+  if retain_count == nil then retain_count = 3 end
+  if retain_count % 1 ~= 0 or retain_count < 0 or retain_count > 100 then
+    return categorized("config")
+  end
 
   local messages = deps.at_client:scan()
   if not messages then return categorized("at", true) end
 
   local first_error
   local at_failed = false
+  local confirmed = {}
   for _, message in ipairs(messages) do
     local fingerprint = deps.delivery.fingerprint(message, nil, config.storage or "SM")
     if not fingerprint then
       first_error = first_error or "ledger"
     elseif deps.ledger:contains(message.index, fingerprint) then
-      local deleted = deps.at_client:delete(message.index)
-      if not deleted then
-        first_error = first_error or "at"
-        at_failed = true
-        break
-      else
-        local removed = deps.ledger:remove(message.index, fingerprint)
-        if not removed then
-          first_error = first_error or "ledger"
-        else
-          local saved = deps.ledger:save_atomic()
-          if not saved then first_error = first_error or "ledger" end
-        end
-      end
+      confirmed[tostring(message.index)] = fingerprint
     elseif not first_error then
       local parts = deps.core.format_parts(message, config.telegram_limit or 4096)
       if not parts then
@@ -75,23 +68,36 @@ function Worker:cycle()
             if not saved then
               first_error = "ledger"
             else
-              local deleted = deps.at_client:delete(message.index)
-              if not deleted then
-                first_error = "at"
-                at_failed = true
-                break
-              else
-                local removed = deps.ledger:remove(message.index, fingerprint)
-                if not removed then
-                  first_error = "ledger"
-                else
-                  local removed_saved = deps.ledger:save_atomic()
-                  if not removed_saved then first_error = "ledger" end
-                end
-              end
+              confirmed[tostring(message.index)] = fingerprint
             end
           end
         end
+      end
+    end
+  end
+
+  local retained = deps.ledger:ordered_matching(confirmed)
+  if not retained then
+    first_error = first_error or "ledger"
+  else
+    local delete_count = #retained - retain_count
+    for position = 1, math.max(0, delete_count) do
+      local record = retained[position]
+      local deleted = deps.at_client:delete(record.index)
+      if not deleted then
+        first_error = first_error or "at"
+        at_failed = true
+        break
+      end
+      local removed = deps.ledger:remove(record.index, record.digest)
+      if not removed then
+        first_error = first_error or "ledger"
+        break
+      end
+      local saved = deps.ledger:save_atomic()
+      if not saved then
+        first_error = first_error or "ledger"
+        break
       end
     end
   end

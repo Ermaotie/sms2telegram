@@ -41,7 +41,7 @@ t.eq("invalid bot token cannot form offset path", status.offset_path and status.
   "/etc/sms2telegram/telegram_update_offset", "123456;reboot"), nil)
 
 local healthy_report = status.format_report and status.format_report({
-  version = "1.1.0",
+  version = "1.1.1",
   uptime_seconds = 3661,
   modem_connected = true,
   device = "/dev/ttyACM0",
@@ -54,7 +54,7 @@ local healthy_report = status.format_report and status.format_report({
   chat_id = "must-not-leak"
 })
 t.truthy("healthy report starts green", healthy_report and healthy_report:match("^🟢"))
-t.truthy("healthy report includes version", healthy_report and healthy_report:find("版本：1.1.0", 1, true))
+t.truthy("healthy report includes version", healthy_report and healthy_report:find("版本：1.1.1", 1, true))
 t.truthy("healthy report includes service uptime", healthy_report and healthy_report:find("运行时长：1小时 1分钟", 1, true))
 t.truthy("healthy report includes modem state", healthy_report and healthy_report:find("短信模块：已连接", 1, true))
 t.truthy("healthy report includes allowed route", healthy_report and healthy_report:find("网络出口：eth0（允许）", 1, true))
@@ -63,7 +63,7 @@ t.truthy("healthy report includes last scan", healthy_report and healthy_report:
 t.eq("healthy report excludes token", healthy_report and healthy_report:find("must-not-leak", 1, true), nil)
 
 local unhealthy_report = status.format_report and status.format_report({
-  version = "1.1.0",
+  version = "1.1.1",
   uptime_seconds = 5,
   modem_connected = false,
   device = "/dev/ttyACM0",
@@ -145,7 +145,7 @@ local bot_ok, bot_err = bot and bot:poll({
   chat_id = "-1001234567890",
   allowed_wan_device = "eth0"
 }, {
-  version = "1.1.0", uptime_seconds = 10, modem_connected = true,
+  version = "1.1.1", uptime_seconds = 10, modem_connected = true,
   device = "/dev/ttyACM0", device_available = true,
   route_device = "eth0", allowed_device = "eth0", last_scan = "正常"
 })
@@ -201,7 +201,7 @@ local failing_ok, failing_err = failing_bot:poll({
   bot_token = "123456:Abc_def-XYZ", chat_id = "-1001234567890",
   allowed_wan_device = "eth0"
 }, {
-  version = "1.1.0", uptime_seconds = 10, modem_connected = true,
+  version = "1.1.1", uptime_seconds = 10, modem_connected = true,
   device = "/dev/ttyACM0", device_available = true,
   route_device = "eth0", allowed_device = "eth0", last_scan = "正常"
 })

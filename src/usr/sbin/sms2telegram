@@ -10,7 +10,7 @@ local worker_module = dofile(libdir .. "/worker.lua")
 local ledger_path = os.getenv("SMS2TELEGRAM_LEDGER_PATH") or "/etc/sms2telegram/delivered"
 local update_offset_path = os.getenv("SMS2TELEGRAM_UPDATE_OFFSET_PATH") or
   "/etc/sms2telegram/telegram_update_offset"
-local service_version = "1.1.0"
+local service_version = "1.1.1"
 local started_at = os.time()
 
 pcall(nixio.openlog, "sms2telegram")
@@ -28,13 +28,19 @@ local function uci_value(key)
   return trim(value)
 end
 
-local function interval(value)
+local function integer_between(value, minimum, maximum)
   local number = tonumber(value)
-  if not number or number % 1 ~= 0 or number < 1 or number > 3600 then return nil end
+  if not number or number % 1 ~= 0 or number < minimum or number > maximum then return nil end
   return number
 end
 
+local function interval(value)
+  return integer_between(value, 1, 3600)
+end
+
 local function load_config()
+  local retain_count = uci_value("retain_count")
+  if retain_count == "" then retain_count = "3" end
   local config = {
     device = uci_value("device"),
     storage = uci_value("storage"),
@@ -44,9 +50,11 @@ local function load_config()
     poll_interval = interval(uci_value("poll_interval")),
     retry_initial = interval(uci_value("retry_initial")),
     retry_max = interval(uci_value("retry_max")),
+    retain_count = integer_between(retain_count, 0, 100),
     telegram_limit = 4096
   }
   if not config.poll_interval or not config.retry_initial or not config.retry_max or
+      not config.retain_count or
       config.retry_initial > config.retry_max then
     return nil
   end

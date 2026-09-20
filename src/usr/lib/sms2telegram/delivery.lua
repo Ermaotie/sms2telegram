@@ -218,8 +218,8 @@ local function valid_index(index)
 end
 
 local function parse_ledger(data)
-  local records = {}
-  if data == "" then return records end
+  local records, order = {}, {}
+  if data == "" then return records, order end
   if data:sub(-1) ~= "\n" then return nil, "corrupt confirmation ledger" end
   for line in data:gmatch("([^\n]*)\n") do
     local index, digest = line:match("^([^\t]*)\t([^\t]*)$")
@@ -228,8 +228,9 @@ local function parse_ledger(data)
     end
     if records[index] then return nil, "corrupt confirmation ledger" end
     records[index] = digest
+    order[#order + 1] = index
   end
-  return records
+  return records, order
 end
 
 function Ledger.new(path, fs)
@@ -250,9 +251,9 @@ function Ledger.new(path, fs)
     if read_err and not tostring(read_err):match("[Nn]o such file") then return nil, read_err end
     data = ""
   end
-  local records, parse_err = parse_ledger(data)
-  if not records then return nil, parse_err end
-  return setmetatable({ path = path, fs = fs, records = records }, Ledger)
+  local records, order_or_error = parse_ledger(data)
+  if not records then return nil, order_or_error end
+  return setmetatable({ path = path, fs = fs, records = records, order = order_or_error }, Ledger)
 end
 
 function Ledger:contains(index, digest)
@@ -262,7 +263,11 @@ end
 function Ledger:add(index, digest)
   index = tostring(index)
   if not valid_index(index) or not valid_digest(digest) then return nil, "invalid confirmation record" end
+  for position = #self.order, 1, -1 do
+    if self.order[position] == index then table.remove(self.order, position) end
+  end
   self.records[index] = digest
+  self.order[#self.order + 1] = index
   return true
 end
 
@@ -270,15 +275,30 @@ function Ledger:remove(index, digest)
   index = tostring(index)
   if self.records[index] ~= digest then return nil, "confirmation record does not match" end
   self.records[index] = nil
+  for position = #self.order, 1, -1 do
+    if self.order[position] == index then table.remove(self.order, position) end
+  end
   return true
 end
 
+function Ledger:ordered_matching(candidates)
+  if type(candidates) ~= "table" then return nil, "invalid confirmation candidates" end
+  local matching = {}
+  for _, index in ipairs(self.order) do
+    local digest = self.records[index]
+    if digest and candidates[index] == digest then
+      matching[#matching + 1] = { index = index, digest = digest }
+    end
+  end
+  return matching
+end
+
 function Ledger:save_atomic()
-  local keys = {}
-  for index in pairs(self.records) do keys[#keys + 1] = index end
-  table.sort(keys, function(left, right) return tonumber(left) < tonumber(right) end)
   local lines = {}
-  for _, index in ipairs(keys) do lines[#lines + 1] = index .. "\t" .. self.records[index] .. "\n" end
+  for _, index in ipairs(self.order) do
+    local digest = self.records[index]
+    if digest then lines[#lines + 1] = index .. "\t" .. digest .. "\n" end
+  end
   local temporary = self.path .. ".tmp"
   local wrote, write_err = write_protected(self.fs, temporary, table.concat(lines))
   if not wrote then return nil, write_err end

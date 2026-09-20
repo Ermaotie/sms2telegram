@@ -46,7 +46,7 @@ printf '%s\n' "$no_source_output" | grep -F 'secret scan not verified: no discov
 mkdir -p "$TMP/export/tests"
 cp "$ROOT/tests/test_package.sh" "$TMP/export/tests/"
 PATH="$TMP/bin:$PATH" ROUTER_SECRET_FILE="$TMP/router.txt" TELEGRAM_SECRET_FILE="$TMP/tg_setting.txt" \
-    sh "$TMP/export/tests/test_package.sh" "$TMP/export/dist/sms2telegram_1.1.0_all.ipk" ||
+    sh "$TMP/export/tests/test_package.sh" "$TMP/export/dist/sms2telegram_1.1.1_all.ipk" ||
     fail "package test should accept explicit sources without Git metadata"
 
 echo "PASS tar portability and exact secret scan fixtures"
