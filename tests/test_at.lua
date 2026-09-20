@@ -42,6 +42,32 @@ t.eq("delete success", scan_client:delete(7), true)
 t.eq("scan sends PDU CMGL", scan_fake.commands[1], "AT+CMGL=4")
 t.eq("delete sends CMGD", scan_fake.commands[2], "AT+CMGD=7")
 
+local diagnostic_fake = fake_transport({
+  "+CSQ: 22,0\r\nOK\r\n",
+  "+CEREG: 0,5\r\nOK\r\n",
+  '+CPMS: "SM",0,10,"SM",0,10,"SM",0,10\r\nOK\r\n'
+})
+local diagnostic_client = at.Client.new(diagnostic_fake, core, {})
+local rssi, ber = diagnostic_client:signal_quality()
+t.eq("signal RSSI parsed", rssi, 22)
+t.eq("signal BER parsed", ber, 0)
+t.eq("LTE registration parsed", diagnostic_client:registration_status(), 5)
+local used, total = diagnostic_client:storage_status()
+t.eq("SMS storage used parsed", used, 0)
+t.eq("SMS storage total parsed", total, 10)
+t.eq("diagnostic AT sequence", table.concat(diagnostic_fake.commands, "|"),
+  "AT+CSQ|AT+CEREG?|AT+CPMS?")
+
+local unknown_signal_client = at.Client.new(fake_transport({ "+CSQ: 99,99\r\nOK\r\n" }), core, {})
+local unknown_rssi, unknown_ber = unknown_signal_client:signal_quality()
+t.eq("unknown signal RSSI retained", unknown_rssi, 99)
+t.eq("unknown signal BER retained", unknown_ber, 99)
+
+local malformed_diagnostic_client = at.Client.new(fake_transport({ "+CSQ: bad\r\nOK\r\n" }), core, {})
+local malformed_rssi, malformed_signal_err = malformed_diagnostic_client:signal_quality()
+t.eq("malformed signal result", malformed_rssi, nil)
+t.truthy("malformed signal error", malformed_signal_err and malformed_signal_err:match("CSQ"))
+
 local timeout_client = at.Client.new(fake_transport({ { nil, "timeout" } }), core, {})
 local timeout_value, timeout_err = timeout_client:scan()
 t.eq("timeout result", timeout_value, nil)

@@ -8,7 +8,8 @@ OpenWrt `procd` 管理并随系统启动。
 恢复成功时继续转发，并将时间标为“未知（原始短信时间异常）”。
 
 在已配置的 Bot 私聊中发送 `/status`，可查看服务版本、运行时长、模块连接、串口、
-网络出口和最近扫描状态。该命令仅响应配置中的数字 `chat_id`，不会返回 Token 或短信正文。
+信号强度、蜂窝注册状态、短信存储使用量、网络出口和最近扫描状态。该命令仅响应
+配置中的数字 `chat_id`，不会返回 Token 或短信正文。
 
 ## 安装和配置
 
@@ -18,7 +19,7 @@ OpenWrt `procd` 管理并随系统启动。
 在路由器上执行：
 
 ```sh
-opkg install /tmp/sms2telegram_1.1.1_all.ipk
+opkg install /tmp/sms2telegram_1.2.0_all.ipk
 uci set sms2telegram.main.bot_token='123456:replace_with_real_token'
 uci set sms2telegram.main.chat_id='-1001234567890'
 uci commit sms2telegram

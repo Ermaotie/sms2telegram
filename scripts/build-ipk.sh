@@ -5,7 +5,7 @@ REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD="$REPO/build/ipk"
 STAGE="$BUILD/data"
 CONTROL="$BUILD/control"
-PACKAGE=sms2telegram_1.1.1_all.ipk
+PACKAGE=sms2telegram_1.2.0_all.ipk
 
 tar_flags_for() {
     case "$1" in

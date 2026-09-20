@@ -17,6 +17,8 @@ local function allowed_prefixes_for(command)
   if command:match("^AT%+CPMS") then return { "+CPMS:" } end
   if command:match("^AT%+CMGF") then return { "+CMGF:" } end
   if command:match("^AT%+CNMI") then return { "+CNMI:" } end
+  if command:match("^AT%+CSQ") then return { "+CSQ:" } end
+  if command:match("^AT%+CEREG") then return { "+CEREG:" } end
   return {}
 end
 
@@ -69,6 +71,40 @@ function Client:scan()
   local response, err = self:command("AT+CMGL=4")
   if not response then return nil, err end
   return self.core.parse_cmgl(response)
+end
+
+function Client:signal_quality()
+  local response, err = self:command("AT+CSQ")
+  if not response then return nil, err end
+  local rssi, ber = response:match("%+CSQ:%s*(%d+)%s*,%s*(%d+)")
+  rssi, ber = tonumber(rssi), tonumber(ber)
+  if not rssi or not ber or (rssi > 31 and rssi ~= 99) or
+      (ber > 7 and ber ~= 99) then
+    return nil, "invalid CSQ response"
+  end
+  return rssi, ber
+end
+
+function Client:registration_status()
+  local response, err = self:command("AT+CEREG?")
+  if not response then return nil, err end
+  local payload = response:match("%+CEREG:%s*([^\r\n]+)")
+  if not payload then return nil, "invalid CEREG response" end
+  local first, second = payload:match("^%s*(%d+)%s*,%s*(%d+)")
+  local status = tonumber(second or payload:match("^%s*(%d+)%s*$"))
+  if not status or status < 0 or status > 5 then return nil, "invalid CEREG response" end
+  return status
+end
+
+function Client:storage_status()
+  local response, err = self:command("AT+CPMS?")
+  if not response then return nil, err end
+  local used, total = response:match('%+CPMS:%s*"[^"]+"%s*,%s*(%d+)%s*,%s*(%d+)')
+  used, total = tonumber(used), tonumber(total)
+  if not used or not total or used < 0 or total < 0 or used > total then
+    return nil, "invalid CPMS response"
+  end
+  return used, total
 end
 
 function Client:delete(index)

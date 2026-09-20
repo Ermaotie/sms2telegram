@@ -7,7 +7,7 @@
 - Telegram 消息以短信正文开头，发件号码和时间放在正文之后。
 - 使用带长度和编码标识的 PDU 模式读取，避免把正文中的 `OK` 或纯数字误判为协议数据。
 - 对部分验证码平台产生的异常时间戳和 GSM 7-bit 位移提供兼容恢复；恢复成功时仍会转发正文，时间标记为未知。
-- 在已配置的 Telegram 聊天中发送 `/status`，可查看服务、串口、网络出口和最近扫描状态。
+- 在已配置的 Telegram 聊天中发送 `/status`，可查看服务、串口、信号强度、蜂窝注册、短信存储、网络出口和最近扫描状态。
 - 只处理入站短信，不转发发件箱记录和短信状态报告。
 - 每次发送（包括长短信的每一段）都检查网络出口，仅允许 `eth0`。
 - 明确禁止使用 4G 模块的 RNDIS/SIM 数据接口 `eth2`。
@@ -32,19 +32,19 @@
 
 从 [Releases](https://github.com/Ermaotie/sms2telegram/releases) 下载：
 
-- `sms2telegram_1.1.1_all.ipk`
-- `sms2telegram_1.1.1_all.ipk.sha256`
+- `sms2telegram_1.2.0_all.ipk`
+- `sms2telegram_1.2.0_all.ipk.sha256`
 
 可在电脑上校验文件：
 
 ```sh
-shasum -a 256 -c sms2telegram_1.1.1_all.ipk.sha256
+shasum -a 256 -c sms2telegram_1.2.0_all.ipk.sha256
 ```
 
 Linux/OpenWrt 也可使用：
 
 ```sh
-sha256sum -c sms2telegram_1.1.1_all.ipk.sha256
+sha256sum -c sms2telegram_1.2.0_all.ipk.sha256
 ```
 
 ## 安装
@@ -52,7 +52,7 @@ sha256sum -c sms2telegram_1.1.1_all.ipk.sha256
 先把 IPK 上传到路由器 `/tmp`，然后执行：
 
 ```sh
-opkg install /tmp/sms2telegram_1.1.1_all.ipk
+opkg install /tmp/sms2telegram_1.2.0_all.ipk
 ```
 
 软件包会安装以下依赖：
@@ -118,7 +118,8 @@ logread -e sms2telegram
 服务由 `procd` 自动拉起。确认记录和缓存顺序保存在 `/etc/sms2telegram/delivered`，不会包含短信正文。
 
 向已配置的 Bot 私聊发送 `/status`，服务会返回当前版本、运行时长、4G 模块连接、
-串口、网络出口及最近一次短信扫描状态。命令只响应配置中的数字 `chat_id`；其他聊天会被忽略。
+串口、信号强度、蜂窝注册状态、短信存储使用量、网络出口及最近一次短信扫描状态。
+命令只响应配置中的数字 `chat_id`；其他聊天会被忽略。
 
 ## 默认配置
 

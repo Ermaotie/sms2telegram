@@ -10,7 +10,7 @@ local worker_module = dofile(libdir .. "/worker.lua")
 local ledger_path = os.getenv("SMS2TELEGRAM_LEDGER_PATH") or "/etc/sms2telegram/delivered"
 local update_offset_path = os.getenv("SMS2TELEGRAM_UPDATE_OFFSET_PATH") or
   "/etc/sms2telegram/telegram_update_offset"
-local service_version = "1.1.1"
+local service_version = "1.2.0"
 local started_at = os.time()
 
 pcall(nixio.openlog, "sms2telegram")
@@ -84,11 +84,46 @@ local last_scan_ok
 local status_bot
 local status_bot_id
 local status_error_logged = false
+local signal_rssi
+local signal_ber
+local registration_status
+local sms_used
+local sms_total
 
 local function mark_scan(message, ok)
   last_scan = message
   last_scan_ok = ok
   last_scan_at = os.date("%Y-%m-%d %H:%M:%S")
+end
+
+local function clear_modem_diagnostics()
+  signal_rssi = nil
+  signal_ber = nil
+  registration_status = nil
+  sms_used = nil
+  sms_total = nil
+end
+
+local function refresh_modem_diagnostics()
+  if not client then
+    clear_modem_diagnostics()
+    return
+  end
+  if type(client.signal_quality) == "function" then
+    signal_rssi, signal_ber = client:signal_quality()
+  else
+    signal_rssi, signal_ber = nil, nil
+  end
+  if type(client.registration_status) == "function" then
+    registration_status = client:registration_status()
+  else
+    registration_status = nil
+  end
+  if type(client.storage_status) == "function" then
+    sms_used, sms_total = client:storage_status()
+  else
+    sms_used, sms_total = nil, nil
+  end
 end
 
 local function ensure_status_bot(config)
@@ -124,6 +159,12 @@ local function poll_status(config)
     device_available = device_available,
     route_device = route_device,
     allowed_device = config.allowed_wan_device,
+    signal_rssi = signal_rssi,
+    signal_ber = signal_ber,
+    registration_status = registration_status,
+    sms_used = sms_used,
+    sms_total = sms_total,
+    retain_count = config.retain_count,
     last_scan = last_scan,
     last_scan_at = last_scan_at,
     last_scan_ok = last_scan_ok
@@ -154,6 +195,7 @@ while true do
     client = nil
     connected_device = nil
     connected_storage = nil
+    clear_modem_diagnostics()
     nixio.nanosleep((config and config.poll_interval) or 1)
   else
     poll_status(config)
@@ -162,6 +204,7 @@ while true do
       client = nil
       connected_device = nil
       connected_storage = nil
+      clear_modem_diagnostics()
     end
     if not client then
       local transport = at.open_nixio_transport(config.device, 115200)
@@ -174,6 +217,7 @@ while true do
         else
           connected_device = config.device
           connected_storage = config.storage
+          refresh_modem_diagnostics()
         end
       end
       if not client then
@@ -202,6 +246,7 @@ while true do
         }, config)
         local ok, category, at_failed = instance:cycle()
         if ok then
+          refresh_modem_diagnostics()
           mark_scan("正常", true)
           delay = nil
           local waited, wait_err = client:wait_for_cmti(config.poll_interval * 1000)
@@ -211,6 +256,7 @@ while true do
             client = nil
             connected_device = nil
             connected_storage = nil
+            clear_modem_diagnostics()
             delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
             log_redacted("at", delay)
             sleep_with_status(config, delay)
@@ -226,6 +272,7 @@ while true do
             client = nil
             connected_device = nil
             connected_storage = nil
+            clear_modem_diagnostics()
           end
           delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
           log_redacted(category, delay)

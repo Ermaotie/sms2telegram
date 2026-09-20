@@ -41,29 +41,37 @@ t.eq("invalid bot token cannot form offset path", status.offset_path and status.
   "/etc/sms2telegram/telegram_update_offset", "123456;reboot"), nil)
 
 local healthy_report = status.format_report and status.format_report({
-  version = "1.1.1",
+  version = "1.2.0",
   uptime_seconds = 3661,
   modem_connected = true,
   device = "/dev/ttyACM0",
   device_available = true,
   route_device = "eth0",
   allowed_device = "eth0",
+  signal_rssi = 22,
+  registration_status = 5,
+  sms_used = 0,
+  sms_total = 10,
+  retain_count = 3,
   last_scan = "正常",
   last_scan_at = "2026-09-06 23:10:00",
   bot_token = "must-not-leak",
   chat_id = "must-not-leak"
 })
 t.truthy("healthy report starts green", healthy_report and healthy_report:match("^🟢"))
-t.truthy("healthy report includes version", healthy_report and healthy_report:find("版本：1.1.1", 1, true))
+t.truthy("healthy report includes version", healthy_report and healthy_report:find("版本：1.2.0", 1, true))
 t.truthy("healthy report includes service uptime", healthy_report and healthy_report:find("运行时长：1小时 1分钟", 1, true))
 t.truthy("healthy report includes modem state", healthy_report and healthy_report:find("短信模块：已连接", 1, true))
 t.truthy("healthy report includes allowed route", healthy_report and healthy_report:find("网络出口：eth0（允许）", 1, true))
 t.truthy("healthy report names configured allowed route", healthy_report and healthy_report:find("允许出口：eth0", 1, true))
+t.truthy("healthy report includes signal", healthy_report and healthy_report:find("信号：很强（22/31，约 -69 dBm）", 1, true))
+t.truthy("healthy report includes registration", healthy_report and healthy_report:find("蜂窝注册：已注册（漫游）", 1, true))
+t.truthy("healthy report includes SMS storage", healthy_report and healthy_report:find("短信存储：0/10（保留上限 3）", 1, true))
 t.truthy("healthy report includes last scan", healthy_report and healthy_report:find("最近扫描：正常（2026-09-06 23:10:00）", 1, true))
 t.eq("healthy report excludes token", healthy_report and healthy_report:find("must-not-leak", 1, true), nil)
 
 local unhealthy_report = status.format_report and status.format_report({
-  version = "1.1.1",
+  version = "1.2.0",
   uptime_seconds = 5,
   modem_connected = false,
   device = "/dev/ttyACM0",
@@ -76,6 +84,7 @@ local unhealthy_report = status.format_report and status.format_report({
 t.truthy("unhealthy report starts warning", unhealthy_report and unhealthy_report:match("^🟠"))
 t.truthy("unhealthy report shows disconnected modem", unhealthy_report and unhealthy_report:find("短信模块：未连接", 1, true))
 t.truthy("unhealthy report shows blocked SIM route", unhealthy_report and unhealthy_report:find("网络出口：eth2（已阻止）", 1, true))
+t.truthy("unhealthy report shows unknown signal", unhealthy_report and unhealthy_report:find("信号：未知", 1, true))
 
 local offset_path = "/tmp/sms2telegram-status-offset-" .. process_id()
 os.remove(offset_path)
@@ -145,7 +154,7 @@ local bot_ok, bot_err = bot and bot:poll({
   chat_id = "-1001234567890",
   allowed_wan_device = "eth0"
 }, {
-  version = "1.1.1", uptime_seconds = 10, modem_connected = true,
+  version = "1.2.0", uptime_seconds = 10, modem_connected = true,
   device = "/dev/ttyACM0", device_available = true,
   route_device = "eth0", allowed_device = "eth0", last_scan = "正常"
 })
@@ -201,7 +210,7 @@ local failing_ok, failing_err = failing_bot:poll({
   bot_token = "123456:Abc_def-XYZ", chat_id = "-1001234567890",
   allowed_wan_device = "eth0"
 }, {
-  version = "1.1.1", uptime_seconds = 10, modem_connected = true,
+  version = "1.2.0", uptime_seconds = 10, modem_connected = true,
   device = "/dev/ttyACM0", device_available = true,
   route_device = "eth0", allowed_device = "eth0", last_scan = "正常"
 })

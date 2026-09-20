@@ -61,13 +61,55 @@ local function format_uptime(value)
   return table.concat(parts, " ")
 end
 
+local function format_signal(rssi)
+  rssi = tonumber(rssi)
+  if not rssi or rssi < 0 or rssi > 31 or rssi % 1 ~= 0 then return "未知" end
+  local quality
+  if rssi <= 9 then
+    quality = "较弱"
+  elseif rssi <= 14 then
+    quality = "一般"
+  elseif rssi <= 19 then
+    quality = "良好"
+  else
+    quality = "很强"
+  end
+  return string.format("%s（%d/31，约 %d dBm）", quality, rssi, -113 + 2 * rssi)
+end
+
+local registration_labels = {
+  [0] = "未注册",
+  [1] = "已注册（本地）",
+  [2] = "正在搜索",
+  [3] = "注册被拒绝",
+  [4] = "未知",
+  [5] = "已注册（漫游）"
+}
+
+local function format_registration(status)
+  return registration_labels[tonumber(status)] or "未知"
+end
+
+local function format_storage(snapshot)
+  local used, total = tonumber(snapshot.sms_used), tonumber(snapshot.sms_total)
+  if not used or not total or used < 0 or total < 0 or used > total then return "未知" end
+  local text = string.format("%d/%d", used, total)
+  local retain_count = tonumber(snapshot.retain_count)
+  if retain_count and retain_count >= 0 and retain_count % 1 == 0 then
+    text = text .. string.format("（保留上限 %d）", retain_count)
+  end
+  return text
+end
+
 function M.format_report(snapshot)
   snapshot = type(snapshot) == "table" and snapshot or {}
   local route_allowed = snapshot.route_device ~= nil and
     snapshot.route_device == snapshot.allowed_device
   local healthy = snapshot.modem_connected == true and
     snapshot.device_available == true and route_allowed and
-    snapshot.last_scan_ok ~= false
+    snapshot.last_scan_ok ~= false and
+    (snapshot.registration_status == nil or snapshot.registration_status == 1 or
+      snapshot.registration_status == 5)
   local header = healthy and "🟢 sms2telegram 服务正常" or
     "🟠 sms2telegram 服务运行中，但存在异常"
   local modem = snapshot.modem_connected and "已连接" or "未连接"
@@ -87,6 +129,9 @@ function M.format_report(snapshot)
     "串口：" .. device,
     "网络出口：" .. route,
     "允许出口：" .. tostring(snapshot.allowed_device or "未知"),
+    "信号：" .. format_signal(snapshot.signal_rssi),
+    "蜂窝注册：" .. format_registration(snapshot.registration_status),
+    "短信存储：" .. format_storage(snapshot),
     "最近扫描：" .. last_scan
   }, "\n")
 end
