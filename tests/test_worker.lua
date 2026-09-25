@@ -39,7 +39,7 @@ local function fixture(options)
     at_client = {
       scan = function()
         events[#events + 1] = "scan"
-        return messages
+        return messages, nil, options.rejected
       end,
       delete = function(_, index)
         events[#events + 1] = "delete"
@@ -105,8 +105,8 @@ local function cycle(options, config)
     bot_token = "token", chat_id = "chat", allowed_wan_device = "eth0",
     telegram_limit = 4096, retain_count = 3
   })
-  local ok, err, at_failed = instance:cycle()
-  return ok, err, events, records, at_failed
+  local ok, err, at_failed, rejected = instance:cycle()
+  return ok, err, events, records, at_failed, rejected
 end
 
 -- Removing the early credential gate would expose the modem or confirmation state.
@@ -176,6 +176,31 @@ local incoming_ok, _, incoming_events = cycle({ messages = incoming_only })
 t.eq("mixed records deliver successfully", incoming_ok, true)
 t.eq("outgoing and report have no worker send or delete", table.concat(incoming_events, ","),
   "scan,route,send,ledger-add,ledger-save")
+
+local partial_messages, _, rejected_records = real_core.parse_cmgl(table.concat({
+  "+CMGL: 5,1,,23",
+  "000407D049A7F109002062311021000023068542A1502800",
+  "+CMGL: 7,0,,20",
+  "00000491214300006290601250002305E8329BFD06", "OK", ""
+}, "\r\n"))
+local partial_ok, partial_err, partial_events, partial_records, partial_at_failed, partial_rejected = cycle({
+  messages = assert(partial_messages), rejected = rejected_records,
+  records = { ["5"] = digest_a }
+}, { bot_token = "token", chat_id = "chat", allowed_wan_device = "eth0", retain_count = 0 })
+t.eq("partial decode still forwards good SMS", partial_ok, true)
+t.eq("partial decode has no delivery error", partial_err, nil)
+t.eq("partial decode does not reconnect modem", partial_at_failed, false)
+t.eq("partial decode surfaces bad slot", partial_rejected[1].index, 5)
+t.eq("partial decode never confirms or removes rejected slot", partial_records["5"], digest_a)
+t.eq("only good SMS is sent and pruned with retention zero", table.concat(partial_events, ","),
+  "scan,route,send,ledger-add,ledger-save,delete,ledger-remove,ledger-save")
+local all_bad_ok, _, all_bad_events, _, all_bad_at_failed, all_bad_rejected = cycle({
+  messages = {}, rejected = rejected_records
+})
+t.eq("all bad records do not break worker", all_bad_ok, true)
+t.eq("all bad records never send or delete", table.concat(all_bad_events, ","), "scan")
+t.eq("all bad records do not reconnect", all_bad_at_failed, false)
+t.eq("all bad records surface count", #all_bad_rejected, 1)
 
 local recover_ok, recover_err, recover_events, recover_records = cycle({ records = { ["7"] = digest_a } })
 t.eq("matching retained result", recover_ok, true)
@@ -472,6 +497,68 @@ return M
   t.eq("AT reconnect daemon stays alive", run_daemon(temp, extra, 3), 0)
   t.eq("AT reconnect closes and rebuilds after Telegram primary error", read_file(at_log),
     "open\ninit\nclose\nopen\ninit\n")
+  shell_status("rm -rf " .. quote(temp))
+end
+
+-- Undecodable records keep the modem connected, normal polling, and honest status.
+do
+  local temp = process_temp()
+  copy_runtime(temp)
+  install_uci(temp)
+  write_file(temp .. "/lib/at.lua", [[local M = { Client = {} }
+function M.open_nixio_transport()
+  local file = assert(io.open(os.getenv("SMS2TELEGRAM_AT_LOG"), "ab"))
+  file:write("open\n"); file:close()
+  return {}
+end
+function M.Client.new(transport)
+  return {
+    transport = transport, initialize = function() return true end,
+    scan = function() return {}, nil, { { index = 5, error = "empty PDU body", raw_pdu = "00AB" } } end,
+    signal_quality = function() return 22, 0 end,
+    wait_for_cmti = function() require("nixio").nanosleep(1); return false end
+  }
+end
+return M
+]])
+  write_file(temp .. "/lib/status.lua", [[local M = { OffsetStore = {}, Bot = {} }
+function M.offset_path(path) return path .. ".123456", "123456" end
+function M.OffsetStore.new() return {} end
+function M.Bot.new()
+  return { poll = function(_, _, snapshot)
+    local file = assert(io.open(os.getenv("SMS2TELEGRAM_STATUS_LOG"), "ab"))
+    file:write(tostring(snapshot.modem_connected) .. ":" .. tostring(snapshot.signal_rssi) ..
+      ":" .. tostring(snapshot.last_scan_ok) .. ":" .. snapshot.last_scan .. "\n")
+    file:close(); return true
+  end }
+end
+return M
+]])
+  local at_log, status_log = temp .. "/at.log", temp .. "/status.log"
+  write_file(temp .. "/bin/ip", "#!/bin/sh\nprintf '1.1.1.1 dev eth0\\n'\n")
+  write_file(temp .. "/bin/curl", [[#!/bin/sh
+while [ "$1" ]; do
+  if [ "$1" = --output ]; then output="$2"; shift 2; else shift; fi
+done
+printf '{"ok":true}' > "$output"
+printf 'alert\n' >> "$SMS2TELEGRAM_SEND_LOG"
+printf 200
+]])
+  write_file(temp .. "/bin/jsonfilter", "#!/bin/sh\nprintf 'true\\n'\n")
+  assert(shell_status("chmod 700 " .. quote(temp .. "/bin/ip") .. " " .. quote(temp .. "/bin/curl") .. " " .. quote(temp .. "/bin/jsonfilter")) == 0)
+  local send_log = temp .. "/send.log"
+  local extra = "SMS2TELEGRAM_AT_LOG=" .. quote(at_log) ..
+    " SMS2TELEGRAM_STATUS_LOG=" .. quote(status_log) .. " SMS2TELEGRAM_STATUS_DISABLED=0" ..
+    " SMS2TELEGRAM_SEND_LOG=" .. quote(send_log)
+  t.eq("partial decode daemon stays alive", run_daemon(temp, extra, 3), 0)
+  t.eq("partial decode never reopens modem", read_file(at_log), "open\n")
+  local _, count = read_file(status_log):gsub(
+    "true:22:false:已保留 1 条无法解析短信，其他短信正常处理", "")
+  t.truthy("partial decode keeps polling with signal and warning", count >= 2)
+  t.eq("daemon reports anomaly only once", read_file(send_log), "alert\n")
+  t.truthy("anomaly confirmation persisted separately", read_file(temp .. "/state/delivered.alerts"):match("^5\t"))
+  t.eq("daemon restart succeeds with retained anomaly", run_daemon(temp, extra, 2), 0)
+  t.eq("daemon restart does not repeat anomaly report", read_file(send_log), "alert\n")
   shell_status("rm -rf " .. quote(temp))
 end
 

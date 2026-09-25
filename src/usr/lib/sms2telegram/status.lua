@@ -132,6 +132,7 @@ function M.format_report(snapshot)
     "信号：" .. format_signal(snapshot.signal_rssi),
     "蜂窝注册：" .. format_registration(snapshot.registration_status),
     "短信存储：" .. format_storage(snapshot),
+    "异常汇报：" .. tostring(snapshot.anomaly_report or "等待扫描"),
     "最近扫描：" .. last_scan
   }, "\n")
 end

@@ -29,7 +29,7 @@ function Worker:cycle()
     return categorized("config")
   end
 
-  local messages = deps.at_client:scan()
+  local messages, _, rejected = deps.at_client:scan()
   if not messages then return categorized("at", true) end
 
   local first_error
@@ -102,6 +102,34 @@ function Worker:cycle()
     end
   end
   if first_error then return categorized(first_error, at_failed) end
+  return true, nil, false, rejected or {}
+end
+
+-- An alert acknowledgement is separate from a successful SMS delivery and must
+-- never make its SIM slot eligible for deletion.
+function Worker:report_rejected(rejected, report_ledger)
+  local deps, config = self.deps, self.config
+  if not deps.delivery.validate_credentials(config.bot_token, config.chat_id) then
+    return nil, "config"
+  end
+  if #rejected == 0 then return true end
+  if not report_ledger then return nil, "ledger" end
+  for _, record in ipairs(rejected) do
+    local digest = deps.delivery.rejection_fingerprint(record, config.storage or "SM")
+    if not digest then return nil, "ledger" end
+    if not report_ledger:contains(record.index, digest) then
+      if not deps.delivery.route_allowed(deps.route(), config.allowed_wan_device, deps.core) then
+        return nil, "route"
+      end
+      local report = deps.core.format_rejection(record, config.storage or "SM")
+      if not deps.sender:send_parts(config.bot_token, config.chat_id, {report}) then
+        return nil, "telegram"
+      end
+      if not report_ledger:add(record.index, digest) or not report_ledger:save_atomic() then
+        return nil, "ledger"
+      end
+    end
+  end
   return true
 end
 

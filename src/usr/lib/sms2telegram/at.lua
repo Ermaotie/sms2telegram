@@ -18,7 +18,8 @@ local function allowed_prefixes_for(command)
   if command:match("^AT%+CMGF") then return { "+CMGF:" } end
   if command:match("^AT%+CNMI") then return { "+CNMI:" } end
   if command:match("^AT%+CSQ") then return { "+CSQ:" } end
-  if command:match("^AT%+CEREG") then return { "+CEREG:" } end
+  -- Some Air780 firmware answers CEREG? using the CGREG query-response prefix.
+  if command == "AT+CEREG?" then return { "+CEREG:", "+CGREG:" } end
   return {}
 end
 
@@ -89,6 +90,10 @@ function Client:registration_status()
   local response, err = self:command("AT+CEREG?")
   if not response then return nil, err end
   local payload = response:match("%+CEREG:%s*([^\r\n]+)")
+  if not payload then
+    -- Require <n>,<stat>; a one-field unsolicited CGREG notice is not a reply.
+    payload = response:match("%+CGREG:%s*([012]%s*,%s*%d+[^\r\n]*)")
+  end
   if not payload then return nil, "invalid CEREG response" end
   local first, second = payload:match("^%s*(%d+)%s*,%s*(%d+)")
   local status = tonumber(second or payload:match("^%s*(%d+)%s*$"))

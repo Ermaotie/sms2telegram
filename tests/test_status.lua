@@ -86,6 +86,18 @@ t.truthy("unhealthy report shows disconnected modem", unhealthy_report and unhea
 t.truthy("unhealthy report shows blocked SIM route", unhealthy_report and unhealthy_report:find("网络出口：eth2（已阻止）", 1, true))
 t.truthy("unhealthy report shows unknown signal", unhealthy_report and unhealthy_report:find("信号：未知", 1, true))
 
+local partial_report = status.format_report({
+  modem_connected = true, device_available = true,
+  route_device = "eth0", allowed_device = "eth0",
+  signal_rssi = 22, registration_status = 5,
+  last_scan = "已保留 1 条无法解析短信，其他短信正常处理", last_scan_ok = false,
+  anomaly_report = "已汇报 1 条异常记录（已去重）"
+})
+t.truthy("partial decode shows warning", partial_report:match("^🟠"))
+t.truthy("partial decode does not claim modem disconnected", partial_report:find("短信模块：已连接", 1, true))
+t.truthy("partial decode explains retained record", partial_report:find("已保留 1 条无法解析短信", 1, true))
+t.truthy("status reports anomaly notification state", partial_report:find("异常汇报：已汇报 1 条异常记录（已去重）", 1, true))
+
 local offset_path = "/tmp/sms2telegram-status-offset-" .. process_id()
 os.remove(offset_path)
 os.remove(offset_path .. ".tmp")

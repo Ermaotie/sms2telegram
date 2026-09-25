@@ -5,6 +5,11 @@ local function encode_codepoint(cp)
   if cp < 0x800 then
     return string.char(0xC0 + math.floor(cp / 64), 0x80 + (cp % 64))
   end
+  if cp >= 0x10000 then
+    return string.char(0xF0 + math.floor(cp / 262144),
+      0x80 + (math.floor(cp / 4096) % 64),
+      0x80 + (math.floor(cp / 64) % 64), 0x80 + (cp % 64))
+  end
   return string.char(
     0xE0 + math.floor(cp / 4096),
     0x80 + (math.floor(cp / 64) % 64),
@@ -16,13 +21,21 @@ function M.ucs2_to_utf8(hex)
   if type(hex) ~= "string" or #hex % 4 ~= 0 or hex:find("[^0-9A-Fa-f]") then
     return nil, "invalid UCS2 hexadecimal input"
   end
-  local out = {}
-  for pos = 1, #hex, 4 do
+  local out, pos = {}, 1
+  while pos <= #hex do
     local cp = tonumber(hex:sub(pos, pos + 3), 16)
-    if cp >= 0xD800 and cp <= 0xDFFF then
+    if cp >= 0xD800 and cp <= 0xDBFF then
+      local low = tonumber(hex:sub(pos + 4, pos + 7), 16)
+      if not low or low < 0xDC00 or low > 0xDFFF then
+        return nil, "UCS2 surrogate is invalid"
+      end
+      cp = 0x10000 + (cp - 0xD800) * 1024 + low - 0xDC00
+      pos = pos + 4
+    elseif cp >= 0xDC00 and cp <= 0xDFFF then
       return nil, "UCS2 surrogate is invalid"
     end
     out[#out + 1] = encode_codepoint(cp)
+    pos = pos + 4
   end
   return table.concat(out)
 end
@@ -298,7 +311,7 @@ end
 
 local function pdu_alphabet(dcs)
   local group = math.floor(dcs / 16)
-  if group <= 3 then
+  if group <= 7 then
     if math.floor(dcs / 32) % 2 == 1 then return nil, "compressed PDU is unsupported" end
     local alphabet = math.floor(dcs / 4) % 4
     if alphabet == 3 then return nil, "reserved PDU data coding scheme" end
@@ -317,7 +330,35 @@ function M.pdu_matches_length(pdu, tpdu_length)
   return #bytes == 1 + bytes[1] + length
 end
 
+local function user_data_header(bytes)
+  if not bytes[1] then return nil, "missing PDU user data header" end
+  local size = bytes[1] + 1
+  if size > #bytes then return nil, "invalid PDU user data header" end
+  local info, pos = { size = size }, 2
+  while pos <= size do
+    local id, length = bytes[pos], bytes[pos + 1]
+    if not length or pos + 1 + length > size then return nil, "invalid PDU user data header" end
+    if (id == 0 and length ~= 3) or (id == 8 and length ~= 4) then
+      return nil, "invalid concatenated SMS header"
+    end
+    if id == 0 or id == 8 then
+      local total, part = bytes[pos + length], bytes[pos + length + 1]
+      if total < 1 or part < 1 or part > total then return nil, "invalid concatenated SMS header" end
+      info.part, info.total = part, total
+    elseif id == 4 or id == 5 then
+      info.port_addressed = true
+    elseif id == 0x24 or id == 0x25 then
+      if length ~= 1 then return nil, "invalid PDU user data header" end
+      if bytes[pos + 2] ~= 0 then info.national_language = true end
+    end
+    pos = pos + 2 + length
+  end
+  return info
+end
+
 function M.decode_sms_pdu(pdu)
+  local metadata = {}
+  local function reject(reason) return nil, reason, metadata end
   local bytes, bytes_err = hex_bytes(pdu)
   if not bytes then return nil, bytes_err end
   local smsc_length = bytes[1]
@@ -355,55 +396,75 @@ function M.decode_sms_pdu(pdu)
 
   if not bytes[pos] or not bytes[pos + 1] then return nil, "truncated PDU protocol fields" end
   local dcs = bytes[pos + 1]
+  metadata.sender, metadata.dcs = sender, dcs
   pos = pos + 2
-  local timestamp, timestamp_err = decode_timestamp(bytes, pos)
+  local timestamp = decode_timestamp(bytes, pos)
+  metadata.timestamp = timestamp or "未知（原始短信时间异常）"
   pos = pos + 7
   local udl = bytes[pos]
-  if not udl then return nil, "missing PDU user data length" end
+  if not udl then return reject("missing PDU user data length") end
   pos = pos + 1
   local user_data = {}
   for index = pos, #bytes do user_data[#user_data + 1] = bytes[index] end
+  metadata.user_data_bytes = #user_data
 
   local alphabet, alphabet_err = pdu_alphabet(dcs)
-  if alphabet == nil then return nil, alphabet_err end
+  if alphabet == nil then return reject(alphabet_err) end
+  if udl == 0 and #user_data == 0 then return reject("empty PDU body") end
+  local warnings = {}
+  if not timestamp then warnings[#warnings + 1] = "原始短信时间异常" end
+  -- Keep the known provider workaround, but flag a heuristic recovery explicitly.
+  -- A bad timestamp alone must not prevent standard decoding of the body.
   if not timestamp then
     local recovered = not udhi and alphabet == 0 and decode_shifted_gsm7(user_data, udl) or nil
     if recovered and recovered ~= "" then
       return {
         kind = "incoming", sender = sender,
-        timestamp = "未知（原始短信时间异常）", body = recovered
+        timestamp = metadata.timestamp, body = recovered,
+        warning = "正文按兼容模式恢复，请核对内容；原始短信时间异常"
       }
     end
-    return nil, timestamp_err
   end
-  local body
+  local header = { size = 0 }
+  if udhi then
+    local header_err
+    header, header_err = user_data_header(user_data)
+    if not header then return reject(header_err) end
+    if header.part then
+      warnings[#warnings + 1] = "长短信第 " .. header.part .. "/" .. header.total .. " 段"
+    end
+  end
+  local body, body_err
   if alphabet == 0 then
-    if #user_data ~= math.ceil(udl * 7 / 8) then return nil, "GSM7 user data length mismatch" end
-    local header_septets = 0
-    if udhi then
-      if not user_data[1] then return nil, "missing PDU user data header" end
-      header_septets = math.ceil((user_data[1] + 1) * 8 / 7)
-      if header_septets > udl then return nil, "invalid PDU user data header" end
-    end
-    body = decode_gsm7(user_data, udl - header_septets, header_septets)
+    if #user_data ~= math.ceil(udl * 7 / 8) then return reject("GSM7 user data length mismatch") end
+    if header.national_language then return reject("unsupported national language table") end
+    local header_septets = math.ceil(header.size * 8 / 7)
+    if header_septets > udl then return reject("invalid PDU user data header") end
+    body, body_err = decode_gsm7(user_data, udl - header_septets, header_septets)
   elseif alphabet == 2 then
-    if #user_data ~= udl then return nil, "UCS2 user data length mismatch" end
-    local start = 1
-    if udhi then
-      if not user_data[1] then return nil, "missing PDU user data header" end
-      start = user_data[1] + 2
-    end
+    if #user_data ~= udl then return reject("UCS2 user data length mismatch") end
+    local start = header.size + 1
     if start > udl + 1 or (udl - start + 1) % 2 ~= 0 then
-      return nil, "invalid UCS2 user data"
+      return reject("invalid UCS2 user data")
     end
     local hex = {}
     for index = start, udl do hex[#hex + 1] = string.format("%02X", user_data[index]) end
-    body = M.ucs2_to_utf8(table.concat(hex))
+    body, body_err = M.ucs2_to_utf8(table.concat(hex))
   else
-    return nil, "unsupported PDU data coding scheme"
+    if #user_data ~= udl then return reject("8-bit user data length mismatch") end
+    if header.port_addressed then return reject("binary application SMS") end
+    local chars = {}
+    for index = header.size + 1, udl do chars[#chars + 1] = string.char(user_data[index]) end
+    body = table.concat(chars)
+    if not pcall(M.utf8_length, body) or body:find("[%z\1-\8\11\12\14-\31\127]") then
+      return reject("8-bit SMS is not readable UTF-8 text")
+    end
+    warnings[#warnings + 1] = "8-bit 数据按 UTF-8 兼容读取"
   end
-  if not body or body == "" then return nil, "invalid or empty PDU body" end
-  return { kind = "incoming", sender = sender, timestamp = timestamp, body = body }
+  if not body or body == "" then return reject(body_err or "empty PDU body") end
+  if body:find("%z") then return reject("body contains NUL characters") end
+  return { kind = "incoming", sender = sender, timestamp = metadata.timestamp, body = body,
+    warning = #warnings > 0 and table.concat(warnings, "；") or nil }
 end
 
 function M.cmgl_record_type(header)
@@ -451,6 +512,7 @@ function M.parse_cmgl(response)
   end
 
   local messages, current, terminal = {}, nil, false
+  local rejected = {}
   local function finish_record()
     if not current then return true end
     if current.kind == "pdu" then
@@ -461,15 +523,22 @@ function M.parse_cmgl(response)
       end
       local numeric_status = tonumber(current.fields[2])
       if numeric_status == 0 or numeric_status == 1 then
-        local decoded, decode_err = M.decode_sms_pdu(pdu)
-        if not decoded then return nil, decode_err end
-        if decoded.kind == "incoming" then
+        local decoded, decode_err, details = M.decode_sms_pdu(pdu)
+        if not decoded then
+          -- The complete frame is synchronized. Preserve this slot on the SIM,
+          -- but do not let an undecodable record block unrelated deliveries.
+          details = details or {}
+          details.index = assert(tonumber(current.fields[1]))
+          details.error, details.raw_pdu = decode_err, pdu:upper()
+          rejected[#rejected + 1] = details
+        elseif decoded.kind == "incoming" then
           messages[#messages + 1] = {
             index = assert(tonumber(current.fields[1])),
             status = numeric_status == 0 and "REC UNREAD" or "REC READ",
             sender = decoded.sender,
             timestamp = decoded.timestamp,
-            body = decoded.body
+            body = decoded.body,
+            warning = decoded.warning
           }
         end
       end
@@ -521,11 +590,37 @@ function M.parse_cmgl(response)
   end
 
   if not terminal then return nil, "missing CMGL terminal status" end
-  return messages
+  return messages, nil, rejected
 end
 
 local function metadata_for(message)
-  return "📩 短信信息\n来自：" .. message.sender .. "\n时间：" .. message.timestamp
+  return "📩 短信信息\n来自：" .. message.sender .. "\n时间：" .. message.timestamp ..
+    (message.warning and ("\n提示：" .. message.warning) or "")
+end
+
+function M.format_rejection(record, storage)
+  local reason = record.error or ""
+  local label = "短信编码或格式暂不支持"
+  if reason:find("empty", 1, true) then label = "短信记录没有正文"
+  elseif reason:find("surrogate", 1, true) then label = "Unicode 字符不完整"
+  elseif reason:find("length", 1, true) or reason:find("truncated", 1, true) then
+    label = "短信数据长度异常或内容不完整"
+  elseif reason:find("header", 1, true) then label = "短信附加头格式异常"
+  elseif reason:find("compressed", 1, true) then label = "暂不支持的压缩短信"
+  elseif reason:find("8-bit", 1, true) or reason:find("binary", 1, true) then
+    label = "二进制短信，无法可靠转换为文字"
+  elseif reason:find("national language", 1, true) then label = "暂不支持的语言字符表"
+  elseif reason:find("NUL", 1, true) then label = "正文包含不可显示的空字符"
+  end
+  return table.concat({
+    "⚠️ 收到异常短信，未能完整识别正文",
+    "来自：" .. (record.sender or "未知"),
+    "时间：" .. (record.timestamp or "未知"),
+    "位置：" .. (storage or "SM") .. " / " .. tostring(record.index),
+    "原因：" .. label,
+    "原短信已保留，不会自动删除；其他短信继续转发。",
+    "同一条记录成功汇报后不再重复提醒。"
+  }, "\n")
 end
 
 local function split_body(body, limit, metadata, count)

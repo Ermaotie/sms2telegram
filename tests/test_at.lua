@@ -42,6 +42,15 @@ t.eq("delete success", scan_client:delete(7), true)
 t.eq("scan sends PDU CMGL", scan_fake.commands[1], "AT+CMGL=4")
 t.eq("delete sends CMGD", scan_fake.commands[2], "AT+CMGD=7")
 
+local partial_client = at.Client.new(fake_transport({ table.concat({
+  "+CMGL: 5,1,,23", "000407D049A7F109002062311021000023068542A1502800",
+  "+CMGL: 7,0,,20", "00000491214300006290601250002305E8329BFD06", "OK", ""
+}, "\r\n") }), core, {})
+local partial_messages, partial_err, partial_rejected = partial_client:scan()
+t.eq("AT scan forwards partial decode results", #assert(partial_messages), 1)
+t.eq("AT scan separates decode error from transport error", partial_err, nil)
+t.eq("AT scan forwards rejected slot", partial_rejected[1].index, 5)
+
 local diagnostic_fake = fake_transport({
   "+CSQ: 22,0\r\nOK\r\n",
   "+CEREG: 0,5\r\nOK\r\n",
@@ -57,6 +66,15 @@ t.eq("SMS storage used parsed", used, 0)
 t.eq("SMS storage total parsed", total, 10)
 t.eq("diagnostic AT sequence", table.concat(diagnostic_fake.commands, "|"),
   "AT+CSQ|AT+CEREG?|AT+CPMS?")
+
+local alias_client = at.Client.new(fake_transport({ "+CGREG: 0,5\r\nOK\r\n" }), core, {})
+t.eq("Air780 CEREG query accepts CGREG reply alias", alias_client:registration_status(), 5)
+local notification_client = at.Client.new(fake_transport({ "+CGREG: 5\r\nOK\r\n" }), core, {})
+t.eq("CGREG one-field notification is not a query reply", notification_client:registration_status(), nil)
+local standard_client = at.Client.new(fake_transport({
+  "+CGREG: 0,5\r\n+CEREG: 0,1\r\nOK\r\n"
+}), core, {})
+t.eq("standard LTE registration reply takes priority", standard_client:registration_status(), 1)
 
 local unknown_signal_client = at.Client.new(fake_transport({ "+CSQ: 99,99\r\nOK\r\n" }), core, {})
 local unknown_rssi, unknown_ber = unknown_signal_client:signal_quality()
@@ -326,6 +344,19 @@ local function real_transport_with_chunks(chunks)
     package.loaded.nixio, package.preload.nixio = original_loaded, original_preload
   end
 end
+
+local alias_transport, restore_alias = real_transport_with_chunks({
+  "+CGREG: 0,5\r\nOK\r\n",
+  '+CPMS: "SM",2,10,"SM",2,10,"SM",2,10\r\nOK\r\n',
+  '+CMGL: 7,0,,20\r\n00000491214300006290601250002305E8329BFD06\r\nOK\r\n'
+})
+local alias_sequence = at.Client.new(alias_transport, core, { timeout_ms = 100 })
+t.eq("transport accepts modem CGREG alias", alias_sequence:registration_status(), 5)
+local alias_used, alias_total = alias_sequence:storage_status()
+t.eq("alias consumes terminal before next query", alias_used, 2)
+t.eq("alias sequence reads storage capacity", alias_total, 10)
+t.eq("alias sequence keeps SMS scan synchronized", assert(alias_sequence:scan())[1].body, "hello")
+restore_alias()
 
 local raw_cmgl_transport, restore_raw_cmgl = real_transport_with_chunks({
   { at = 0, data = table.concat({

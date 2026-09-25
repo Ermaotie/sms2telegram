@@ -209,6 +209,15 @@ function M.fingerprint(message, sha256_fn, storage)
   return digest
 end
 
+function M.rejection_fingerprint(record, storage)
+  if type(record) ~= "table" or type(record.raw_pdu) ~= "string" or
+      record.raw_pdu == "" or #record.raw_pdu % 2 ~= 0 or record.raw_pdu:find("[^0-9A-Fa-f]") then
+    return nil, "invalid rejected SMS fingerprint input"
+  end
+  return M.fingerprint({ index = record.index, sender = "sms2telegram-anomaly-v1",
+    timestamp = "", body = record.raw_pdu:upper() }, nil, storage)
+end
+
 local Ledger = {}
 Ledger.__index = Ledger
 
