@@ -19,9 +19,6 @@ SIM -> LuatOS sms.setNewSmsCb -> uart.VUART_0 JSONL
     -> OpenWrt /dev/ttyACM* -> Telegram
 ```
 
-AT 控制口仍可选地用于 `AT+CSQ` 和 `AT+CEREG?` 状态查询，但不再执行任何短信 AT
-命令，也不能和 VUART 配成同一设备。
-
 协议每行一条 JSON，以 `\n` 结束。正文中的真实换行由 `json.encode` 转义，不会破坏
 分帧：
 
@@ -49,7 +46,7 @@ API 依据：[LuatOS SMS](https://docs.openluat.com/osapi/core/sms/)、
 ## 识别 VUART 设备
 
 项目采用“单一 UCI 配置项”，不盲扫并打开所有 `/dev/ttyACM*`，因为候选端口还可能是
-AT 或调试口，而且 `ready` 是启动事件。首次部署时：
+调试口，而且 `ready` 是启动事件。首次部署时：
 
 1. 停止服务：`/etc/init.d/sms2telegram stop`。
 2. 执行 `ls -l /dev/ttyACM*`，逐个候选口以 115200/8N1 读取。
@@ -61,7 +58,6 @@ AT 或调试口，而且 `ready` 是启动事件。首次部署时：
 
 ```sh
 uci set sms2telegram.main.sms_device='/dev/ttyACM2'
-uci set sms2telegram.main.device='/dev/ttyACM0' # 可选 AT 诊断口
 uci commit sms2telegram
 ```
 
@@ -69,8 +65,8 @@ uci commit sms2telegram
 
 ```sh
 sh scripts/build-ipk.sh
-scp dist/sms2telegram_2.0.0_all.ipk root@ROUTER:/tmp/
-ssh root@ROUTER 'opkg install /tmp/sms2telegram_2.0.0_all.ipk'
+scp dist/sms2telegram_2.1.0_all.ipk root@ROUTER:/tmp/
+ssh root@ROUTER 'opkg install /tmp/sms2telegram_2.1.0_all.ipk'
 ```
 
 配置 Telegram 和路由出口：
@@ -84,10 +80,19 @@ uci commit sms2telegram
 /etc/init.d/sms2telegram restart
 ```
 
-`device` 是可选 AT 诊断口；不需要信号/注册状态时可设为空。`sms_device` 必须是 VUART，且
-两者不能相同。服务由 procd 拉起，串口读/open/HUP 失败后按 `retry_initial` 到
+`sms_device` 必须是 VUART。服务由 procd 拉起，串口读/open/HUP 失败后按 `retry_initial` 到
 `retry_max` 自动退避重连。非法 JSON 只记录 warning。Telegram 失败时消息留在内存队列，
-继续读取串口并按相同策略重试。最近 200 条“号码 + 时间 + 正文”用于内存去重。
+继续读取串口并按相同策略重试。收到的短信同时以私有权限持久化到
+`/etc/sms2telegram/messages.jsonl`。最近 200 条“号码 + 时间 + 正文”用于内存去重。
+
+Telegram 机器人命令：
+
+- `/status`：服务、VUART、出口、已保存短信数量和保留策略；
+- `/list`：列出全部已保存短信；`/list 验证码` 按号码、时间或正文过滤；
+- `/clear`：删除全部已保存短信；
+- `/cycle 30`：只保留最近 30 天收到的短信，立即清理过期记录；
+- `/cycle off`：关闭循环清理，保留全部短信；
+- `/cycle`：查看当前保留策略。
 
 ```sh
 logread -e sms2telegram
@@ -112,21 +117,20 @@ logread -e sms2telegram
 
 ```sh
 lua tests/test_core.lua src
-lua tests/test_at.lua src
 lua tests/test_serial.lua src
+lua tests/test_store.lua src
 lua tests/test_vuart.lua src
 lua tests/test_worker.lua src
 sh tests/test_openwrt.sh
 sh tests/test_router_smoke.sh
 sh scripts/build-ipk.sh
-sh tests/test_package.sh dist/sms2telegram_2.0.0_all.ipk
+sh tests/test_package.sh dist/sms2telegram_2.1.0_all.ipk
 ```
 
 路由器联调（先重启模组，让它重新输出 `ready`）：
 
 ```sh
-AT_DEVICE=/dev/ttyACM0 SMS_DEVICE=/dev/ttyACM2 \
-  STTY_BIN=/usr/bin/stty sh tests/router-smoke.sh
+SMS_DEVICE=/dev/ttyACM2 STTY_BIN=/usr/bin/stty sh tests/router-smoke.sh
 ```
 
 必须完成以下实机用例：

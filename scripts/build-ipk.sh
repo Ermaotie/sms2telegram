@@ -5,7 +5,7 @@ REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD="$REPO/build/ipk"
 STAGE="$BUILD/data"
 CONTROL="$BUILD/control"
-PACKAGE=sms2telegram_2.0.0_all.ipk
+PACKAGE=sms2telegram_2.1.0_all.ipk
 
 tar_flags_for() {
     case "$1" in
@@ -68,10 +68,10 @@ mkdir -p "$STAGE" "$CONTROL" "$REPO/dist"
 for path in \
     etc/config/sms2telegram \
     etc/init.d/sms2telegram \
-    usr/lib/sms2telegram/at.lua \
     usr/lib/sms2telegram/core.lua \
     usr/lib/sms2telegram/delivery.lua \
     usr/lib/sms2telegram/serial.lua \
+    usr/lib/sms2telegram/store.lua \
     usr/lib/sms2telegram/status.lua \
     usr/lib/sms2telegram/vuart.lua \
     usr/lib/sms2telegram/worker.lua \

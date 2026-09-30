@@ -65,8 +65,6 @@ config_get() {
     default=${4-}
     eval "$variable=\${cfg_$key:-$default}"
 }
-config_get device main device
-assert_eq "$device" "/dev/ttyACM0" "default device"
 config_get sms_device main sms_device
 assert_eq "$sms_device" "/dev/ttyACM2" "default VUART device"
 config_get allowed_wan_device main allowed_wan_device
@@ -84,7 +82,7 @@ assert_eq "$(mode_of "$ROOT/src/usr/sbin/sms2telegram")" "755" "daemon mode"
 guide="$ROOT/src/usr/share/doc/sms2telegram/README.zh-CN.md"
 [ -f "$guide" ] || fail "Chinese operations guide is missing"
 for command in \
-    "opkg install /tmp/sms2telegram_2.0.0_all.ipk" \
+    "opkg install /tmp/sms2telegram_2.1.0_all.ipk" \
     "uci set sms2telegram.main.bot_token='123456:replace_with_real_token'" \
     "uci set sms2telegram.main.chat_id='-1001234567890'" \
     "uci commit sms2telegram" \
@@ -93,6 +91,9 @@ for command in \
     "/etc/init.d/sms2telegram status" \
     "opkg remove sms2telegram"; do
     grep -F "$command" "$guide" >/dev/null || fail "guide omits: $command"
+done
+for command in /status /list /clear '/cycle 30' '/cycle off'; do
+    grep -F "$command" "$guide" >/dev/null || fail "guide omits bot command: $command"
 done
 grep -F 'allowed_wan_device' "$guide" >/dev/null || fail "guide omits allowed_wan_device"
 grep -F 'eth0' "$guide" >/dev/null || fail "guide omits eth0 requirement"

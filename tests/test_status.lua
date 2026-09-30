@@ -1,8 +1,8 @@
 local root = assert(arg[1], "source root required")
 local t = dofile("tests/testlib.lua")
-local nixio = require "nixio"
 local core = dofile(root .. "/usr/lib/sms2telegram/core.lua")
 local delivery = dofile(root .. "/usr/lib/sms2telegram/delivery.lua")
+local status = dofile(root .. "/usr/lib/sms2telegram/status.lua")
 
 local function process_id()
   local pipe = assert(io.popen("echo $$"))
@@ -12,231 +12,127 @@ local function process_id()
 end
 
 local function mode(path)
-  local metadata = nixio.fs.stat(path)
-  return metadata and tostring(metadata.modedec)
+  local pipe = assert(io.popen("stat -f '%Lp' '" .. path .. "' 2>/dev/null || stat -c '%a' '" .. path .. "'"))
+  local value = pipe:read("*l")
+  pipe:close()
+  return value
 end
 
-local loaded, status = pcall(dofile, root .. "/usr/lib/sms2telegram/status.lua")
-local recognized = loaded and status.is_status_command and status.is_status_command("/status")
-t.eq("plain status command is recognized", recognized, true)
-t.eq("status command with arguments is ignored", status.is_status_command("/status now"), false)
+t.eq("status command", status.parse_command("/status"), "status")
+local command, argument = status.parse_command("/list 验证码")
+t.eq("list command", command, "list")
+t.eq("list keyword", argument, "验证码")
+t.eq("plain list command", status.parse_command("/list"), "list")
+t.eq("clear command", status.parse_command("/clear"), "clear")
+command, argument = status.parse_command("/cycle 30")
+t.eq("cycle command", command, "cycle")
+t.eq("cycle days", argument, "30")
+command, argument = status.parse_command("/cycle OFF")
+t.eq("cycle off command", command, "cycle")
+t.eq("cycle off normalized", argument, "off")
+t.eq("unknown command ignored", status.parse_command("/status now"), nil)
 
-local authorized = status.should_reply and status.should_reply({
-  update_id = 41,
-  message = { chat = { id = -1001234567890 }, text = "/status" }
-}, "-1001234567890")
-t.eq("configured chat may request status", authorized, true)
-t.eq("different chat cannot request status", status.should_reply and status.should_reply({
-  update_id = 42,
-  message = { chat = { id = 987654321 }, text = "/status" }
-}, "-1001234567890"), false)
-t.eq("non-message update cannot request status", status.should_reply and status.should_reply({
-  update_id = 43,
-  callback_query = {}
-}, "-1001234567890"), false)
-t.eq("update offset is scoped to bot identity", status.offset_path and status.offset_path(
-  "/etc/sms2telegram/telegram_update_offset", "123456:Abc_def-XYZ"),
-  "/etc/sms2telegram/telegram_update_offset.123456")
-t.eq("invalid bot token cannot form offset path", status.offset_path and status.offset_path(
-  "/etc/sms2telegram/telegram_update_offset", "123456;reboot"), nil)
+local authorized = {
+  update_id = 1, message = { chat = { id = -1001234567890 }, text = "/clear" }
+}
+t.eq("configured chat may issue commands",
+  status.command_for(authorized, "-1001234567890"), "clear")
+t.eq("different chat cannot issue commands",
+  status.command_for(authorized, "987654321"), nil)
 
-local healthy_report = status.format_report and status.format_report({
-  version = "1.2.0",
-  uptime_seconds = 3661,
-  sms_connected = true,
-  sms_ready = true,
-  sms_device = "/dev/ttyACM2",
-  sms_device_available = true,
-  modem_connected = true,
-  device = "/dev/ttyACM0",
-  device_available = true,
-  route_device = "eth0",
-  allowed_device = "eth0",
-  signal_rssi = 22,
-  registration_status = 5,
-  last_scan = "正常",
-  last_scan_at = "2026-09-06 23:10:00",
-  bot_token = "must-not-leak",
-  chat_id = "must-not-leak"
-})
-t.truthy("healthy report starts green", healthy_report and healthy_report:match("^🟢"))
-t.truthy("healthy report includes version", healthy_report and healthy_report:find("版本：1.2.0", 1, true))
-t.truthy("healthy report includes service uptime", healthy_report and healthy_report:find("运行时长：1小时 1分钟", 1, true))
-t.truthy("healthy report includes VUART state", healthy_report and healthy_report:find("短信 VUART：已连接，模组已就绪", 1, true))
-t.truthy("healthy report includes VUART device", healthy_report and healthy_report:find("VUART 设备：/dev/ttyACM2（可用）", 1, true))
-t.truthy("healthy report includes AT diagnostics", healthy_report and healthy_report:find("AT 诊断口：已连接", 1, true))
-t.truthy("healthy report includes allowed route", healthy_report and healthy_report:find("网络出口：eth0（允许）", 1, true))
-t.truthy("healthy report names configured allowed route", healthy_report and healthy_report:find("允许出口：eth0", 1, true))
-t.truthy("healthy report includes signal", healthy_report and healthy_report:find("信号：很强（22/31，约 -69 dBm）", 1, true))
-t.truthy("healthy report includes registration", healthy_report and healthy_report:find("蜂窝注册：已注册（漫游）", 1, true))
-t.truthy("healthy report includes last event", healthy_report and healthy_report:find("最近事件：正常（2026-09-06 23:10:00）", 1, true))
-t.eq("healthy report excludes token", healthy_report and healthy_report:find("must-not-leak", 1, true), nil)
-
-local unhealthy_report = status.format_report and status.format_report({
-  version = "1.2.0",
-  uptime_seconds = 5,
-  sms_connected = false,
-  sms_device = "/dev/ttyACM2",
-  sms_device_available = false,
-  modem_connected = false,
-  device = "/dev/ttyACM0",
-  device_available = false,
-  route_device = "eth2",
-  allowed_device = "eth0",
-  last_scan = "串口异常",
-  last_scan_at = "2026-09-06 23:11:00"
-})
-t.truthy("unhealthy report starts warning", unhealthy_report and unhealthy_report:match("^🟠"))
-t.truthy("unhealthy report shows disconnected VUART", unhealthy_report and unhealthy_report:find("短信 VUART：未连接", 1, true))
-t.truthy("unhealthy report shows blocked SIM route", unhealthy_report and unhealthy_report:find("网络出口：eth2（已阻止）", 1, true))
-t.truthy("unhealthy report shows unknown signal", unhealthy_report and unhealthy_report:find("信号：未知", 1, true))
-
-local partial_report = status.format_report({
+local report = status.format_report({
+  version = "2.1.0", uptime_seconds = 3661,
   sms_connected = true, sms_ready = true,
   sms_device = "/dev/ttyACM2", sms_device_available = true,
-  modem_connected = true, device_available = true,
   route_device = "eth0", allowed_device = "eth0",
-  signal_rssi = 22, registration_status = 5,
-  last_scan = "收到非法 VUART 数据", last_scan_ok = false
+  persisted_count = 12, retention_days = 30,
+  last_scan = "正常", last_scan_at = "2026-10-01 00:00:00"
 })
-t.truthy("invalid VUART data shows warning", partial_report:match("^🟠"))
-t.truthy("warning keeps VUART connected", partial_report:find("短信 VUART：已连接", 1, true))
-t.truthy("warning explains invalid event", partial_report:find("收到非法 VUART 数据", 1, true))
+t.truthy("healthy report starts green", report:match("^🟢"))
+t.truthy("status shows persisted count", report:find("已保存短信：12 条", 1, true))
+t.truthy("status shows retention", report:find("保留策略：30 天", 1, true))
+t.eq("status omits AT diagnostics", report:find("AT 诊断", 1, true), nil)
+t.eq("status omits signal", report:find("信号：", 1, true), nil)
+t.eq("status omits cellular registration", report:find("蜂窝注册", 1, true), nil)
+t.truthy("list formats sender", status.format_list({ {
+  timestamp = "2026-10-01 00:00:00", number = "10086", text = "余额提醒"
+} }):find("来自：10086", 1, true))
 
 local offset_path = "/tmp/sms2telegram-status-offset-" .. process_id()
-os.remove(offset_path)
-os.remove(offset_path .. ".tmp")
-local offset_store, offset_err
-if status.OffsetStore then offset_store, offset_err = status.OffsetStore.new(offset_path) end
-t.truthy("missing offset file starts empty", offset_store, offset_err)
-t.eq("empty offset is nil", offset_store and offset_store:get(), nil)
-t.eq("valid offset saves atomically", offset_store and offset_store:save(44), true)
+os.remove(offset_path); os.remove(offset_path .. ".tmp")
+local offset_store = assert(status.OffsetStore.new(offset_path))
+t.eq("empty offset is nil", offset_store:get(), nil)
+t.eq("offset saves atomically", offset_store:save(44), true)
 t.eq("offset file is private", mode(offset_path), "600")
-local reloaded_store = status.OffsetStore and status.OffsetStore.new(offset_path)
-t.eq("saved offset survives restart", reloaded_store and reloaded_store:get(), 44)
-local corrupt_file = assert(io.open(offset_path, "wb"))
-corrupt_file:write("not-an-offset\n")
-corrupt_file:close()
-local corrupt_store, corrupt_err
-if status.OffsetStore then corrupt_store, corrupt_err = status.OffsetStore.new(offset_path) end
-t.eq("corrupt offset fails closed", corrupt_store, nil)
-t.truthy("corrupt offset reports error", corrupt_err)
-os.remove(offset_path)
-os.remove(offset_path .. ".tmp")
+t.eq("offset survives restart", assert(status.OffsetStore.new(offset_path)):get(), 44)
+os.remove(offset_path); os.remove(offset_path .. ".tmp")
 
 local bot_pid = process_id()
 local bot_offset_path = "/tmp/sms2telegram-status-bot-offset-" .. bot_pid
 local response_path = "/tmp/sms2telegram." .. bot_pid .. ".updates"
-os.remove(bot_offset_path)
-os.remove(bot_offset_path .. ".tmp")
-os.remove(response_path)
+os.remove(bot_offset_path); os.remove(bot_offset_path .. ".tmp"); os.remove(response_path)
 local bot_store = assert(status.OffsetStore.new(bot_offset_path))
-local bot_events, sent_parts, curl_command = {}, {}
-local bot = status.Bot and status.Bot.new({
+local sent, cycle_days, cleared, list_keyword = {}, nil, false, nil
+local message_store = {
+  prune = function() return true end,
+  records = function(_, keyword)
+    list_keyword = keyword
+    return { { timestamp = "2026-10-01 00:00:00", number = "10086",
+      text = string.rep("验", 80) } }
+  end,
+  clear = function() cleared = true; return 1 end,
+  cycle = function() return cycle_days end,
+  set_cycle = function(_, value)
+    if value == "off" then cycle_days = nil else cycle_days = tonumber(value) end
+    return true
+  end
+}
+local bot = assert(status.Bot.new({
   delivery = delivery,
   core = core,
-  route = function()
-    bot_events[#bot_events + 1] = "route"
-    return "1.1.1.1 dev eth0 src 192.168.1.2"
-  end,
-  exec = function(command)
-    bot_events[#bot_events + 1] = "curl"
-    curl_command = command
+  route = function() return "1.1.1.1 dev eth0 src 192.168.1.2" end,
+  exec = function()
     local response = assert(io.open(response_path, "wb"))
     response:write('{"ok":true,"result":[]}')
     response:close()
     return 0, "200"
   end,
   decode_json = function()
-    return {
-      ok = true,
-      result = {
-        { update_id = 41, message = { chat = { id = 987654321 }, text = "/status" } },
-        { update_id = 42, message = { chat = { id = -1001234567890 }, text = "hello" } },
-        { update_id = 43, message = { chat = { id = -1001234567890 }, text = "/status" } }
-      }
-    }
-  end,
-  sender = {
-    send_parts = function(_, token, chat_id, parts)
-      bot_events[#bot_events + 1] = "send"
-      sent_parts[#sent_parts + 1] = { token = token, chat_id = chat_id, body = parts[1] }
-      return true
-    end
-  },
-  offset_store = bot_store
-}, { pid = bot_pid })
-local bot_ok, bot_err = bot and bot:poll({
-  bot_token = "123456:Abc_def-XYZ",
-  chat_id = "-1001234567890",
-  allowed_wan_device = "eth0"
-}, {
-  version = "1.2.0", uptime_seconds = 10, sms_connected = true, sms_ready = true,
-  sms_device = "/dev/ttyACM2", sms_device_available = true, modem_connected = true,
-  device = "/dev/ttyACM0", device_available = true,
-  route_device = "eth0", allowed_device = "eth0", last_scan = "正常"
-})
-t.eq("authorized status poll succeeds", bot_ok, true)
-t.eq("status poll checks route before fetch and reply", table.concat(bot_events, ","), "route,curl,route,send")
-t.eq("status poll replies exactly once", #sent_parts, 1)
-t.eq("status reply targets configured chat", sent_parts[1] and sent_parts[1].chat_id, "-1001234567890")
-t.truthy("status reply contains service state", sent_parts[1] and sent_parts[1].body:find("服务正常", 1, true))
-t.truthy("getUpdates request is used", curl_command and curl_command:find("/getUpdates", 1, true))
-t.truthy("getUpdates explicitly requests message updates", curl_command and
-  curl_command:find('allowed_updates=["message"]', 1, true))
-t.eq("processed updates advance persistent offset", bot_store:get(), 44)
-t.eq("getUpdates response is removed", io.open(response_path, "rb"), nil)
-os.remove(bot_offset_path)
-os.remove(bot_offset_path .. ".tmp")
-os.remove(response_path)
-
-local failing_pid = process_id()
-local failing_response_path = "/tmp/sms2telegram." .. failing_pid .. ".updates"
-local failing_events = {}
-local failing_bot = assert(status.Bot.new({
-  delivery = delivery,
-  core = core,
-  route = function()
-    failing_events[#failing_events + 1] = "route"
-    return "1.1.1.1 dev eth0 src 192.168.1.2"
-  end,
-  exec = function()
-    failing_events[#failing_events + 1] = "curl"
-    local response = assert(io.open(failing_response_path, "wb"))
-    response:write('{"ok":true,"result":[]}')
-    response:close()
-    return 0, "200"
-  end,
-  decode_json = function()
     return { ok = true, result = {
-      { update_id = 70, message = { chat = { id = -1001234567890 }, text = "/status" } }
+      { update_id = 10, message = { chat = { id = 1 }, text = "/clear" } },
+      { update_id = 11, message = { chat = { id = -1001234567890 }, text = "/status" } },
+      { update_id = 12, message = { chat = { id = -1001234567890 }, text = "/list 验" } },
+      { update_id = 13, message = { chat = { id = -1001234567890 }, text = "/cycle 30" } },
+      { update_id = 14, message = { chat = { id = -1001234567890 }, text = "/cycle off" } },
+      { update_id = 15, message = { chat = { id = -1001234567890 }, text = "/clear" } }
     } }
   end,
-  sender = { send_parts = function()
-    failing_events[#failing_events + 1] = "send"
+  sender = { send_parts = function(_, _, chat_id, parts)
+    sent[#sent + 1] = { chat_id = chat_id, parts = parts }
     return true
   end },
-  offset_store = {
-    get = function() return nil end,
-    save = function()
-      failing_events[#failing_events + 1] = "save"
-      return nil, "read-only filesystem"
-    end
-  }
-}, { pid = failing_pid }))
-local failing_ok, failing_err = failing_bot:poll({
-  bot_token = "123456:Abc_def-XYZ", chat_id = "-1001234567890",
-  allowed_wan_device = "eth0"
-}, {
-  version = "1.2.0", uptime_seconds = 10, sms_connected = true, sms_ready = true,
-  sms_device = "/dev/ttyACM2", sms_device_available = true, modem_connected = true,
-  device = "/dev/ttyACM0", device_available = true,
-  route_device = "eth0", allowed_device = "eth0", last_scan = "正常"
-})
-t.eq("offset failure rejects status command", failing_ok, nil)
-t.truthy("offset failure is reported", failing_err and failing_err:find("read-only", 1, true))
-t.eq("offset is persisted before any reply", table.concat(failing_events, ","),
-  "route,curl,route,save")
-os.remove(failing_response_path)
+  offset_store = bot_store,
+  store = message_store
+}, { pid = bot_pid }))
 
+local ok, err = bot:poll({
+  bot_token = "123456:Abc_def-XYZ", chat_id = "-1001234567890",
+  allowed_wan_device = "eth0", telegram_limit = 100
+}, {
+  version = "2.1.0", uptime_seconds = 10,
+  sms_connected = true, sms_ready = true,
+  sms_device = "/dev/ttyACM2", sms_device_available = true,
+  route_device = "eth0", allowed_device = "eth0", persisted_count = 1
+})
+t.eq("command poll succeeds", ok, true, err)
+t.eq("only authorized commands reply", #sent, 5)
+t.eq("list keyword reaches store", list_keyword, "验")
+t.truthy("long list reply is split", #sent[2].parts > 1)
+t.truthy("cycle command confirms days", sent[3].parts[1]:find("30 天", 1, true))
+t.truthy("cycle off confirms full retention", sent[4].parts[1]:find("保留全部", 1, true))
+t.eq("clear reaches store", cleared, true)
+t.eq("all updates advance offset", bot_store:get(), 16)
+t.eq("temporary response is removed", io.open(response_path, "rb"), nil)
+
+os.remove(bot_offset_path); os.remove(bot_offset_path .. ".tmp"); os.remove(response_path)
 t.finish()

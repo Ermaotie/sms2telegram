@@ -19,8 +19,20 @@ local default_fs = {
   chmod = default_chmod
 }
 
+function M.parse_command(text)
+  if text == "/status" then return "status" end
+  if text == "/list" then return "list", "" end
+  if type(text) ~= "string" then return nil end
+  local keyword = text:match("^/list%s+(.+)$")
+  if keyword then return "list", keyword:match("^%s*(.-)%s*$") end
+  if text == "/clear" then return "clear" end
+  if text == "/cycle" then return "cycle" end
+  local cycle = text:match("^/cycle%s+([^%s]+)%s*$")
+  if cycle then return "cycle", cycle:lower() end
+end
+
 function M.is_status_command(text)
-  return text == "/status"
+  return M.parse_command(text) == "status"
 end
 
 local function chat_id_string(value)
@@ -28,14 +40,18 @@ local function chat_id_string(value)
   if type(value) == "string" then return value end
 end
 
-function M.should_reply(update, configured_chat_id)
+function M.command_for(update, configured_chat_id)
   if type(update) ~= "table" or type(update.message) ~= "table" or
       type(update.message.chat) ~= "table" then
-    return false
+    return nil
   end
   local incoming_chat_id = chat_id_string(update.message.chat.id)
-  return incoming_chat_id ~= nil and incoming_chat_id == configured_chat_id and
-    M.is_status_command(update.message.text)
+  if incoming_chat_id == nil or incoming_chat_id ~= configured_chat_id then return nil end
+  return M.parse_command(update.message.text)
+end
+
+function M.should_reply(update, configured_chat_id)
+  return M.command_for(update, configured_chat_id) ~= nil
 end
 
 function M.offset_path(base_path, token)
@@ -61,55 +77,19 @@ local function format_uptime(value)
   return table.concat(parts, " ")
 end
 
-local function format_signal(rssi)
-  rssi = tonumber(rssi)
-  if not rssi or rssi < 0 or rssi > 31 or rssi % 1 ~= 0 then return "未知" end
-  local quality
-  if rssi <= 9 then
-    quality = "较弱"
-  elseif rssi <= 14 then
-    quality = "一般"
-  elseif rssi <= 19 then
-    quality = "良好"
-  else
-    quality = "很强"
-  end
-  return string.format("%s（%d/31，约 %d dBm）", quality, rssi, -113 + 2 * rssi)
-end
-
-local registration_labels = {
-  [0] = "未注册",
-  [1] = "已注册（本地）",
-  [2] = "正在搜索",
-  [3] = "注册被拒绝",
-  [4] = "未知",
-  [5] = "已注册（漫游）"
-}
-
-local function format_registration(status)
-  return registration_labels[tonumber(status)] or "未知"
-end
-
 function M.format_report(snapshot)
   snapshot = type(snapshot) == "table" and snapshot or {}
   local route_allowed = snapshot.route_device ~= nil and
     snapshot.route_device == snapshot.allowed_device
   local healthy = snapshot.sms_connected == true and
     snapshot.sms_device_available == true and route_allowed and
-    snapshot.last_scan_ok ~= false and
-    (snapshot.registration_status == nil or snapshot.registration_status == 1 or
-      snapshot.registration_status == 5)
+    snapshot.last_scan_ok ~= false
   local header = healthy and "🟢 sms2telegram 服务正常" or
     "🟠 sms2telegram 服务运行中，但存在异常"
   local sms_link = snapshot.sms_connected and
     (snapshot.sms_ready and "已连接，模组已就绪" or "已连接，等待 ready") or "未连接"
   local sms_device = tostring(snapshot.sms_device or "未知") ..
     (snapshot.sms_device_available and "（可用）" or "（不可用）")
-  local at_link = snapshot.modem_connected and "已连接" or "未连接"
-  local configured_at = type(snapshot.device) == "string" and snapshot.device ~= "" and
-    snapshot.device or "未配置"
-  local at_device = configured_at ..
-    (snapshot.device_available and "（可用）" or "（不可用）")
   local route = tostring(snapshot.route_device or "未知") ..
     (route_allowed and "（允许）" or "（已阻止）")
   local last_scan = tostring(snapshot.last_scan or "等待首次扫描")
@@ -122,13 +102,40 @@ function M.format_report(snapshot)
     "运行时长：" .. format_uptime(snapshot.uptime_seconds),
     "短信 VUART：" .. sms_link,
     "VUART 设备：" .. sms_device,
-    "AT 诊断口：" .. at_link .. " / " .. at_device,
     "网络出口：" .. route,
     "允许出口：" .. tostring(snapshot.allowed_device or "未知"),
-    "信号：" .. format_signal(snapshot.signal_rssi),
-    "蜂窝注册：" .. format_registration(snapshot.registration_status),
+    "已保存短信：" .. tostring(snapshot.persisted_count or 0) .. " 条",
+    "保留策略：" .. (snapshot.retention_days and
+      (tostring(snapshot.retention_days) .. " 天") or "全部保存"),
     "最近事件：" .. last_scan
   }, "\n")
+end
+
+function M.format_list(records, keyword)
+  records = type(records) == "table" and records or {}
+  local title = keyword and keyword ~= "" and
+    ("📚 关键词“" .. keyword .. "”匹配 " .. #records .. " 条短信") or
+    ("📚 已保存短信：" .. #records .. " 条")
+  if #records == 0 then return title end
+  local lines = { title }
+  for index, record in ipairs(records) do
+    lines[#lines + 1] = table.concat({
+      "", "[" .. index .. "] " .. tostring(record.timestamp),
+      "来自：" .. tostring(record.number), tostring(record.text)
+    }, "\n")
+  end
+  return table.concat(lines, "\n")
+end
+
+local function split_reply(core, text, limit)
+  local parts = {}
+  while core.utf8_length(text) > limit do
+    local part
+    part, text = core.utf8_prefix(text, limit)
+    parts[#parts + 1] = part
+  end
+  if text ~= "" then parts[#parts + 1] = text end
+  return parts
 end
 
 local OffsetStore = {}
@@ -250,7 +257,8 @@ function Bot.new(deps, options)
     ("/tmp/sms2telegram." .. pid .. ".updates") or nil
   if type(deps.delivery) ~= "table" or type(deps.core) ~= "table" or
       type(deps.route) ~= "function" or type(deps.exec) ~= "function" or
-      type(deps.sender) ~= "table" or type(deps.offset_store) ~= "table" then
+      type(deps.sender) ~= "table" or type(deps.offset_store) ~= "table" or
+      type(deps.store) ~= "table" then
     return nil, "invalid status bot dependencies"
   end
   return setmetatable({
@@ -260,6 +268,7 @@ function Bot.new(deps, options)
     exec = deps.exec,
     sender = deps.sender,
     offset_store = deps.offset_store,
+    store = deps.store,
     decode_json = deps.decode_json or default_json_decode,
     fs = deps.fs or default_fs,
     response_path = response_path
@@ -309,8 +318,8 @@ function Bot:poll(config, snapshot)
     local update_id = type(update) == "table" and update.update_id or nil
     if not valid_offset(update_id) then return nil, "invalid Telegram update id" end
     if next_offset == nil or update_id >= next_offset then
-      local reply = M.should_reply(update, config.chat_id)
-      if reply then
+      local action, argument = M.command_for(update, config.chat_id)
+      if action then
         local reply_route_ok, reply_route_err = self.delivery.route_allowed(
           self.route(), config.allowed_wan_device, self.core)
         if not reply_route_ok then return nil, reply_route_err end
@@ -318,10 +327,36 @@ function Bot:poll(config, snapshot)
       next_offset = update_id + 1
       local saved, save_err = self.offset_store:save(next_offset)
       if not saved then return nil, save_err end
-      if reply then
+      if action then
+        local reply
+        if action == "status" then
+          reply = M.format_report(snapshot)
+        elseif action == "list" then
+          local pruned, prune_err = self.store:prune()
+          local records, list_err = pruned and self.store:records(argument)
+          reply = records and M.format_list(records, argument) or
+            ("操作失败：" .. tostring(prune_err or list_err))
+        elseif action == "clear" then
+          local count, clear_err = self.store:clear()
+          reply = count and ("已删除 " .. count .. " 条已保存短信") or
+            ("操作失败：" .. tostring(clear_err))
+        elseif action == "cycle" and argument == nil then
+          local days = self.store:cycle()
+          reply = days and ("当前仅保留最近 " .. days .. " 天的短信") or
+            "当前保留全部短信"
+        elseif action == "cycle" then
+          local changed, cycle_err = self.store:set_cycle(argument)
+          if changed then
+            local days = self.store:cycle()
+            reply = days and ("已设置仅保留最近 " .. days .. " 天的短信") or
+              "已关闭循环清理，将保留全部短信"
+          else
+            reply = "设置失败：" .. tostring(cycle_err)
+          end
+        end
         local sent, send_err = self.sender:send_parts(config.bot_token, config.chat_id,
-          { M.format_report(snapshot) })
-        if not sent then return nil, send_err or "Telegram status reply failed" end
+          split_reply(self.core, reply, config.telegram_limit or 4096))
+        if not sent then return nil, send_err or "Telegram command reply failed" end
       end
     end
   end

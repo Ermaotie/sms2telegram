@@ -48,7 +48,7 @@ pass "control archive paths"
 
 control_field() { awk -F ': ' -v key="$1" '$1 == key { print substr($0, length(key) + 3); exit }' "$TMP/control/control"; }
 assert_eq "$(control_field Package)" "sms2telegram" "package name"
-assert_eq "$(control_field Version)" "2.0.0" "package version"
+assert_eq "$(control_field Version)" "2.1.0" "package version"
 assert_eq "$(control_field Architecture)" "all" "package architecture"
 assert_eq "$(control_field Depends)" "lua, luci-lib-nixio, luci-lib-jsonc, coreutils-stty, curl, ca-bundle, jsonfilter" "package dependencies"
 pass "control metadata"
@@ -57,11 +57,11 @@ pass "conffile declaration"
 
 expected_data='etc/config/sms2telegram
 etc/init.d/sms2telegram
-usr/lib/sms2telegram/at.lua
 usr/lib/sms2telegram/core.lua
 usr/lib/sms2telegram/delivery.lua
 usr/lib/sms2telegram/serial.lua
 usr/lib/sms2telegram/status.lua
+usr/lib/sms2telegram/store.lua
 usr/lib/sms2telegram/vuart.lua
 usr/lib/sms2telegram/worker.lua
 usr/sbin/sms2telegram
@@ -94,10 +94,10 @@ pass "persistent state directory without runtime state"
 for path in \
     etc/config/sms2telegram \
     etc/init.d/sms2telegram \
-    usr/lib/sms2telegram/at.lua \
     usr/lib/sms2telegram/core.lua \
     usr/lib/sms2telegram/delivery.lua \
     usr/lib/sms2telegram/serial.lua \
+    usr/lib/sms2telegram/store.lua \
     usr/lib/sms2telegram/status.lua \
     usr/lib/sms2telegram/vuart.lua \
     usr/lib/sms2telegram/worker.lua \

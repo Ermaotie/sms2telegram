@@ -5,14 +5,18 @@ local json = require "luci.jsonc"
 local libdir = os.getenv("SMS2TELEGRAM_LIBDIR") or "/usr/lib/sms2telegram"
 local core = dofile(libdir .. "/core.lua")
 local serial = dofile(libdir .. "/serial.lua")
-local at = dofile(libdir .. "/at.lua")
 local vuart = dofile(libdir .. "/vuart.lua")
 local delivery = dofile(libdir .. "/delivery.lua")
+local store_module = dofile(libdir .. "/store.lua")
 local status_module = dofile(libdir .. "/status.lua")
 local worker_module = dofile(libdir .. "/worker.lua")
 local update_offset_path = os.getenv("SMS2TELEGRAM_UPDATE_OFFSET_PATH") or
   "/etc/sms2telegram/telegram_update_offset"
-local service_version = "2.0.0"
+local message_store_path = os.getenv("SMS2TELEGRAM_STORE_PATH") or
+  "/etc/sms2telegram/messages.jsonl"
+local cycle_path = os.getenv("SMS2TELEGRAM_CYCLE_PATH") or
+  "/etc/sms2telegram/cycle"
+local service_version = "2.1.0"
 local started_at = os.time()
 
 pcall(nixio.openlog, "sms2telegram")
@@ -42,7 +46,6 @@ end
 
 local function load_config()
   local config = {
-    device = uci_value("device"),
     sms_device = uci_value("sms_device"),
     bot_token = uci_value("bot_token"),
     chat_id = uci_value("chat_id"),
@@ -52,8 +55,8 @@ local function load_config()
     retry_max = interval(uci_value("retry_max")),
     telegram_limit = 4096
   }
-  if config.sms_device == "" or config.sms_device == config.device or
-      not config.poll_interval or not config.retry_initial or not config.retry_max or
+  if config.sms_device == "" or not config.poll_interval or
+      not config.retry_initial or not config.retry_max or
       config.retry_initial > config.retry_max then return nil end
   return config
 end
@@ -72,6 +75,13 @@ local function decode_json(line)
   return json.parse(line)
 end
 
+local messages_store = assert(store_module.new({
+  path = message_store_path,
+  cycle_path = cycle_path,
+  encode = json.stringify,
+  decode = json.parse
+}))
+
 local status_bot, status_bot_id
 local function ensure_status_bot(config)
   if os.getenv("SMS2TELEGRAM_STATUS_DISABLED") == "1" then return nil end
@@ -86,14 +96,14 @@ local function ensure_status_bot(config)
     route = route_output,
     exec = delivery._run,
     sender = delivery.Sender.new({}, { pid = nixio.getpid() }),
-    offset_store = store
+    offset_store = store,
+    store = messages_store
   }, { pid = nixio.getpid() })
   status_bot_id = status_bot and bot_id or nil
   return status_bot
 end
 
-local receiver, at_client
-local signal_rssi, signal_ber, registration_status
+local receiver
 local vuart_ready = false
 local last_event = "等待 Air780EPV 事件"
 local last_event_at, last_event_ok
@@ -107,6 +117,8 @@ local function poll_status(config)
   local bot = ensure_status_bot(config)
   if not bot then return end
   local route_device = core.route_device(route_output())
+  local pruned = messages_store:prune()
+  local persisted_count = pruned and messages_store:count() or 0
   bot:poll(config, {
     version = service_version,
     uptime_seconds = os.time() - started_at,
@@ -114,37 +126,14 @@ local function poll_status(config)
     sms_ready = vuart_ready,
     sms_device = config.sms_device,
     sms_device_available = nixio.fs.stat(config.sms_device) ~= nil,
-    modem_connected = at_client ~= nil,
-    device = config.device,
-    device_available = config.device ~= "" and nixio.fs.stat(config.device) ~= nil,
     route_device = route_device,
     allowed_device = config.allowed_wan_device,
-    signal_rssi = signal_rssi,
-    signal_ber = signal_ber,
-    registration_status = registration_status,
+    persisted_count = persisted_count or 0,
+    retention_days = messages_store:cycle(),
     last_scan = last_event,
     last_scan_at = last_event_at,
     last_scan_ok = last_event_ok
   })
-end
-
-local function refresh_at(config)
-  if config.device == "" then return end
-  if not at_client then
-    local transport = serial.open(config.device, 115200, { drain = true })
-    if not transport then return end
-    local client = at.Client.new(transport)
-    if not client:initialize() then close_transport(transport); return end
-    at_client = client
-  end
-  local rssi, ber = at_client:signal_quality()
-  local registered = at_client:registration_status()
-  if not rssi or registered == nil then
-    close_transport(at_client.transport)
-    at_client, signal_rssi, signal_ber, registration_status = nil, nil, nil, nil
-    return
-  end
-  signal_rssi, signal_ber, registration_status = rssi, ber, registered
 end
 
 local function run(config)
@@ -157,7 +146,7 @@ local function run(config)
   -- ponytail: retry queue is in memory; add a tiny spool file only if crash-safe delivery is required.
   local reconnect_delay, reconnect_after = nil, 0
   local send_delay, send_after = nil, 0
-  local status_after, diagnostics_after = 0, 0
+  local status_after = 0
 
   while true do
     local now = os.time()
@@ -165,11 +154,6 @@ local function run(config)
       poll_status(config)
       status_after = now + config.poll_interval
     end
-    if now >= diagnostics_after then
-      refresh_at(config)
-      diagnostics_after = now + 60
-    end
-
     if not receiver and now >= reconnect_after then
       local transport = serial.open(config.sms_device, 115200)
       if transport then
@@ -209,8 +193,14 @@ local function run(config)
         else
           local queued = worker:enqueue(message)
           if queued then
+            local saved, save_err = messages_store:append(message)
             log("info", "sms", "received from " .. message.number)
-            mark_event("收到短信，等待转发", true)
+            if saved then
+              mark_event("短信已保存，等待转发", true)
+            else
+              log("err", "sms-store", tostring(save_err))
+              mark_event("短信保存失败，仍将转发", false)
+            end
           else
             log("info", "sms", "duplicate ignored")
           end
