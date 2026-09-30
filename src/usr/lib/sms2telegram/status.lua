@@ -90,30 +90,25 @@ local function format_registration(status)
   return registration_labels[tonumber(status)] or "未知"
 end
 
-local function format_storage(snapshot)
-  local used, total = tonumber(snapshot.sms_used), tonumber(snapshot.sms_total)
-  if not used or not total or used < 0 or total < 0 or used > total then return "未知" end
-  local text = string.format("%d/%d", used, total)
-  local retain_count = tonumber(snapshot.retain_count)
-  if retain_count and retain_count >= 0 and retain_count % 1 == 0 then
-    text = text .. string.format("（保留上限 %d）", retain_count)
-  end
-  return text
-end
-
 function M.format_report(snapshot)
   snapshot = type(snapshot) == "table" and snapshot or {}
   local route_allowed = snapshot.route_device ~= nil and
     snapshot.route_device == snapshot.allowed_device
-  local healthy = snapshot.modem_connected == true and
-    snapshot.device_available == true and route_allowed and
+  local healthy = snapshot.sms_connected == true and
+    snapshot.sms_device_available == true and route_allowed and
     snapshot.last_scan_ok ~= false and
     (snapshot.registration_status == nil or snapshot.registration_status == 1 or
       snapshot.registration_status == 5)
   local header = healthy and "🟢 sms2telegram 服务正常" or
     "🟠 sms2telegram 服务运行中，但存在异常"
-  local modem = snapshot.modem_connected and "已连接" or "未连接"
-  local device = tostring(snapshot.device or "未知") ..
+  local sms_link = snapshot.sms_connected and
+    (snapshot.sms_ready and "已连接，模组已就绪" or "已连接，等待 ready") or "未连接"
+  local sms_device = tostring(snapshot.sms_device or "未知") ..
+    (snapshot.sms_device_available and "（可用）" or "（不可用）")
+  local at_link = snapshot.modem_connected and "已连接" or "未连接"
+  local configured_at = type(snapshot.device) == "string" and snapshot.device ~= "" and
+    snapshot.device or "未配置"
+  local at_device = configured_at ..
     (snapshot.device_available and "（可用）" or "（不可用）")
   local route = tostring(snapshot.route_device or "未知") ..
     (route_allowed and "（允许）" or "（已阻止）")
@@ -125,15 +120,14 @@ function M.format_report(snapshot)
     header,
     "版本：" .. tostring(snapshot.version or "未知"),
     "运行时长：" .. format_uptime(snapshot.uptime_seconds),
-    "短信模块：" .. modem,
-    "串口：" .. device,
+    "短信 VUART：" .. sms_link,
+    "VUART 设备：" .. sms_device,
+    "AT 诊断口：" .. at_link .. " / " .. at_device,
     "网络出口：" .. route,
     "允许出口：" .. tostring(snapshot.allowed_device or "未知"),
     "信号：" .. format_signal(snapshot.signal_rssi),
     "蜂窝注册：" .. format_registration(snapshot.registration_status),
-    "短信存储：" .. format_storage(snapshot),
-    "异常汇报：" .. tostring(snapshot.anomaly_report or "等待扫描"),
-    "最近扫描：" .. last_scan
+    "最近事件：" .. last_scan
   }, "\n")
 end
 

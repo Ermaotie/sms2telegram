@@ -1,136 +1,78 @@
 local M = {}
-
 local Worker = {}
 Worker.__index = Worker
 
-local function categorized(category, at_failed)
-  return nil, category, at_failed
-end
-
-local function valid_dependencies(deps)
-  return type(deps) == "table" and type(deps.core) == "table" and
-    type(deps.delivery) == "table" and type(deps.at_client) == "table" and
-    type(deps.sender) == "table" and type(deps.ledger) == "table" and
-    type(deps.route) == "function"
-end
-
 function Worker.new(deps, config)
-  assert(valid_dependencies(deps), "worker dependencies required")
-  return setmetatable({ deps = deps, config = config or {} }, Worker)
+  assert(type(deps) == "table" and type(deps.core) == "table" and
+    type(deps.delivery) == "table" and type(deps.sender) == "table" and
+    type(deps.route) == "function", "worker dependencies required")
+  return setmetatable({
+    deps = deps,
+    config = config or {},
+    pending = {},
+    pending_keys = {},
+    seen = {},
+    seen_order = {},
+    seen_limit = 200
+  }, Worker)
 end
 
-function Worker:cycle()
-  local deps, config = self.deps, self.config
-  local credentials_ok = deps.delivery.validate_credentials(config.bot_token, config.chat_id)
-  if not credentials_ok then return categorized("config") end
-  local retain_count = tonumber(config.retain_count)
-  if retain_count == nil then retain_count = 3 end
-  if retain_count % 1 ~= 0 or retain_count < 0 or retain_count > 100 then
-    return categorized("config")
-  end
-
-  local messages, _, rejected = deps.at_client:scan()
-  if not messages then return categorized("at", true) end
-
-  local first_error
-  local at_failed = false
-  local confirmed = {}
-  for _, message in ipairs(messages) do
-    local fingerprint = deps.delivery.fingerprint(message, nil, config.storage or "SM")
-    if not fingerprint then
-      first_error = first_error or "ledger"
-    elseif deps.ledger:contains(message.index, fingerprint) then
-      confirmed[tostring(message.index)] = fingerprint
-    elseif not first_error then
-      local parts = deps.core.format_parts(message, config.telegram_limit or 4096)
-      if not parts then
-        first_error = "at"
-      else
-        for _, part in ipairs(parts) do
-          local route_output = deps.route()
-          local route_ok = deps.delivery.route_allowed(route_output, config.allowed_wan_device, deps.core)
-          if not route_ok then
-            first_error = "route"
-            break
-          end
-          local sent = deps.sender:send_parts(config.bot_token, config.chat_id, { part })
-          if not sent then
-            first_error = "telegram"
-            break
-          end
-        end
-        if not first_error then
-          local added = deps.ledger:add(message.index, fingerprint)
-          if not added then
-            first_error = "ledger"
-          else
-            local saved = deps.ledger:save_atomic()
-            if not saved then
-              first_error = "ledger"
-            else
-              confirmed[tostring(message.index)] = fingerprint
-            end
-          end
-        end
-      end
-    end
-  end
-
-  local retained = deps.ledger:ordered_matching(confirmed)
-  if not retained then
-    first_error = first_error or "ledger"
-  else
-    local delete_count = #retained - retain_count
-    for position = 1, math.max(0, delete_count) do
-      local record = retained[position]
-      local deleted = deps.at_client:delete(record.index)
-      if not deleted then
-        first_error = first_error or "at"
-        at_failed = true
-        break
-      end
-      local removed = deps.ledger:remove(record.index, record.digest)
-      if not removed then
-        first_error = first_error or "ledger"
-        break
-      end
-      local saved = deps.ledger:save_atomic()
-      if not saved then
-        first_error = first_error or "ledger"
-        break
-      end
-    end
-  end
-  if first_error then return categorized(first_error, at_failed) end
-  return true, nil, false, rejected or {}
+local function key_for(message)
+  -- message_id is only a hint; content prevents an ID collision from dropping a real SMS.
+  return table.concat({ message.number, message.timestamp, message.text }, "\0")
 end
 
--- An alert acknowledgement is separate from a successful SMS delivery and must
--- never make its SIM slot eligible for deletion.
-function Worker:report_rejected(rejected, report_ledger)
-  local deps, config = self.deps, self.config
+function Worker:enqueue(message)
+  local key = key_for(message)
+  if self.seen[key] or self.pending_keys[key] then return false, "duplicate" end
+  self.pending[#self.pending + 1] = message
+  self.pending_keys[key] = true
+  return true
+end
+
+function Worker:pending_count()
+  return #self.pending
+end
+
+local function remember(self, key)
+  self.seen[key] = true
+  self.seen_order[#self.seen_order + 1] = key
+  if #self.seen_order > self.seen_limit then
+    self.seen[table.remove(self.seen_order, 1)] = nil
+  end
+end
+
+function Worker:process_next()
+  local message = self.pending[1]
+  if not message then return true end
+  local config, deps = self.config, self.deps
   if not deps.delivery.validate_credentials(config.bot_token, config.chat_id) then
     return nil, "config"
   end
-  if #rejected == 0 then return true end
-  if not report_ledger then return nil, "ledger" end
-  for _, record in ipairs(rejected) do
-    local digest = deps.delivery.rejection_fingerprint(record, config.storage or "SM")
-    if not digest then return nil, "ledger" end
-    if not report_ledger:contains(record.index, digest) then
-      if not deps.delivery.route_allowed(deps.route(), config.allowed_wan_device, deps.core) then
-        return nil, "route"
-      end
-      local report = deps.core.format_rejection(record, config.storage or "SM")
-      if not deps.sender:send_parts(config.bot_token, config.chat_id, {report}) then
-        return nil, "telegram"
-      end
-      if not report_ledger:add(record.index, digest) or not report_ledger:save_atomic() then
-        return nil, "ledger"
-      end
+  local parts, format_err = deps.core.format_parts({
+    sender = message.number,
+    timestamp = message.timestamp,
+    body = message.text
+  }, config.telegram_limit or 4096)
+  if not parts then
+    local key = key_for(message)
+    table.remove(self.pending, 1)
+    self.pending_keys[key] = nil
+    return nil, "message", format_err, message
+  end
+  for _, part in ipairs(parts) do
+    if not deps.delivery.route_allowed(deps.route(), config.allowed_wan_device, deps.core) then
+      return nil, "route"
+    end
+    if not deps.sender:send_parts(config.bot_token, config.chat_id, { part }) then
+      return nil, "telegram"
     end
   end
-  return true
+  local key = key_for(message)
+  table.remove(self.pending, 1)
+  self.pending_keys[key] = nil
+  remember(self, key)
+  return true, nil, nil, message
 end
 
 function M.new(deps, config)

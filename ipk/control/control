@@ -1,8 +1,8 @@
 Package: sms2telegram
-Version: 1.3.0
+Version: 2.0.0
 Architecture: all
 Maintainer: Local Administrator
 Depends: lua, luci-lib-nixio, luci-lib-jsonc, coreutils-stty, curl, ca-bundle, jsonfilter
 Section: net
 Priority: optional
-Description: Forward stored Air780EPV SMS messages to Telegram using the router uplink.
+Description: Forward Air780EPV LuatOS VUART SMS events to Telegram using the router uplink.

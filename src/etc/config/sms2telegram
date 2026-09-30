@@ -1,11 +1,12 @@
 config sms2telegram 'main'
 	option enabled '1'
+	# AT control port: diagnostics only, never used to receive SMS.
 	option device '/dev/ttyACM0'
-	option storage 'SM'
+	# LuatOS uart.VUART_0 port. Keep this separate from device.
+	option sms_device '/dev/ttyACM2'
 	option bot_token ''
 	option chat_id ''
 	option allowed_wan_device 'eth0'
 	option poll_interval '15'
 	option retry_initial '15'
 	option retry_max '300'
-	option retain_count '3'

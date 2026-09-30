@@ -67,8 +67,8 @@ config_get() {
 }
 config_get device main device
 assert_eq "$device" "/dev/ttyACM0" "default device"
-config_get storage main storage
-assert_eq "$storage" "SM" "default storage"
+config_get sms_device main sms_device
+assert_eq "$sms_device" "/dev/ttyACM2" "default VUART device"
 config_get allowed_wan_device main allowed_wan_device
 assert_eq "$allowed_wan_device" "eth0" "default allowed WAN device"
 config_get poll_interval main poll_interval
@@ -77,8 +77,6 @@ config_get retry_initial main retry_initial
 assert_eq "$retry_initial" "15" "default initial retry"
 config_get retry_max main retry_max
 assert_eq "$retry_max" "300" "default maximum retry"
-config_get retain_count main retain_count
-assert_eq "$retain_count" "3" "default retained SMS count"
 
 assert_eq "$(mode_of "$ROOT/src/etc/init.d/sms2telegram")" "755" "init script mode"
 assert_eq "$(mode_of "$ROOT/src/usr/sbin/sms2telegram")" "755" "daemon mode"
@@ -86,7 +84,7 @@ assert_eq "$(mode_of "$ROOT/src/usr/sbin/sms2telegram")" "755" "daemon mode"
 guide="$ROOT/src/usr/share/doc/sms2telegram/README.zh-CN.md"
 [ -f "$guide" ] || fail "Chinese operations guide is missing"
 for command in \
-    "opkg install /tmp/sms2telegram_1.3.0_all.ipk" \
+    "opkg install /tmp/sms2telegram_2.0.0_all.ipk" \
     "uci set sms2telegram.main.bot_token='123456:replace_with_real_token'" \
     "uci set sms2telegram.main.chat_id='-1001234567890'" \
     "uci commit sms2telegram" \

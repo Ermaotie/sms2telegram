@@ -1,81 +1,41 @@
 # sms2telegram OpenWrt 使用指南
 
-本服务从 Air780EPV 读取短信，并通过路由器的 Telegram 连接转发。安装后由
-OpenWrt `procd` 管理并随系统启动。
+本版本只从 Air780EP/Air780EPV LuatOS 的 `uart.VUART_0` 接收单行 JSON，不再用
+`AT+CNMI`、`+CMTI`、`AT+CMGL/CMGR` 或 PDU 解析收短信。AT 口仅保留信号和注册状态查询。
 
-模块使用 PDU 模式读取短信，并优先按 TPDU 长度和 DCS 编码解析。若验证码平台
-产生异常时间戳并伴随 GSM 7-bit 位移，服务会从多个位移中选择可读度最高的正文；
-恢复成功时继续转发，并将时间标为“未知（原始短信时间异常）”。
+## 安装
 
-对于仍无法解码的完整 PDU 记录，服务会保留原短信并继续处理其他短信，
-`/status` 会显示异常记录数量，不再将其误报为串口断线。异常记录不会发送、
-确认或自动删除，也不计入成功转发后保留最新 3 条的上限，可能额外占用 SIM 空间。
-通信响应本身缺失、长度不匹配时仍会停止本轮处理并重试。
-
-异常短信会主动向同一个 Bot 汇报来源、存储位置和原因，不包含原始 PDU。
-提醒成功后以指纹去重，服务重启不重复提醒；失败独立退避重试，不阻塞正常短信。
-确认文件 `/etc/sms2telegram/delivered.alerts` 只保存槽位和指纹，权限 `0600`。
-提醒成功不等于正文转发成功，不会使异常短信被删除。若提醒已送达但本机保存确认
-失败，重试仍可能重复提醒。`/status` 的“异常汇报”行显示已汇报或等待重试。
-
-支持中文与 UTF-16 emoji；时间损坏时仍继续解码正文；支持常见 DCS 编码组和
-可读的 8-bit UTF-8 文本。兼容恢复会提示核对，未知/压缩/二进制内容不猜测为验证码。
-长短信按分段转发并标注段号，暂不自动拼接。
-
-在已配置的 Bot 私聊中发送 `/status`，可查看服务版本、运行时长、模块连接、串口、
-信号强度、蜂窝注册状态、短信存储使用量、网络出口和最近扫描状态。该命令仅响应
-配置中的数字 `chat_id`，不会返回 Token 或短信正文。
-兼容部分 Air780 固件将 `AT+CEREG?` 的响应标记为 `+CGREG`，避免注册状态查询
-引发后续串口响应错位。
-
-## 安装和配置
-
-首次使用前，请先在 Telegram 中打开 Bot 并发送 `/start`。Bot 无法主动联系一个
-从未开始过会话的用户；此时 Telegram 会返回 `chat not found`。
-
-在路由器上执行：
+先用 LuaTools 烧录仓库 `luatos/sms_gateway/main.lua`，再安装 IPK：
 
 ```sh
-opkg install /tmp/sms2telegram_1.3.0_all.ipk
+opkg install /tmp/sms2telegram_2.0.0_all.ipk
 uci set sms2telegram.main.bot_token='123456:replace_with_real_token'
 uci set sms2telegram.main.chat_id='-1001234567890'
+uci set sms2telegram.main.sms_device='/dev/ttyACM2'
+uci set sms2telegram.main.device='/dev/ttyACM0'
+uci set sms2telegram.main.allowed_wan_device='eth0'
 uci commit sms2telegram
 /etc/init.d/sms2telegram restart
 ```
 
-上面的 Token 和 Chat ID 仅是格式占位符。请替换为真实凭据；不要把真实凭据
-粘贴到日志、工单或截图中。配置文件由 root 保护，修改后用 `uci commit` 保存。
+首次识别 VUART：停止服务，逐个监听 `/dev/ttyACM*`，监听期间重启模组；输出
+`{"type":"ready","project":"sms_gateway",...}` 的端口就是 `sms_device`。它不能与 AT
+诊断口 `device` 相同。OpenClash 等代理可以继续使用，但默认路由必须是允许的 `eth0`，
+不能走 SIM 数据口 `eth2`。
 
-本路由器的允许出口必须保持为 `eth0`：配置中的
-`allowed_wan_device` 不得改成其他接口。`eth2` 是调制解调器的 RNDIS/SIM
-数据接口，明确禁止用于 Telegram 出口；服务发现默认路由不是 `eth0` 时会
-拒绝发送并保留短信。
-
-未配置 Bot Token 或 Chat ID 时，服务只等待配置，不读取、删除或触碰短信。
-因此可以先安装服务，再完成凭据配置。Telegram 确认成功后，服务会在 SIM 中
-保留最新 3 条入站短信；第 4 条成功转发后才删除最旧的一条。发送失败的短信会
-留在队列中等待重试。
-
-确认记录和保留顺序保存在 `/etc/sms2telegram/delivered`，可以跨重启保留；本机 `/var`
-指向临时存储，因此不用于确认记录。安装包创建权限为 `0700` 的状态目录，服务
-启动时也会补建或修复目录权限；准备失败会记录 `ledger` 错误并暂停发送。
-记录文件仅在运行时生成，权限为 `0600`，不包含短信正文，也不随安装包分发。
-
-已成功转发并保留的短信在重启后不会重复发送。配置项 `retain_count` 默认为 `3`，
-表示 SIM 中保留的最新入站短信数量。超长短信每一段发送前都检查出口；若后续段
-失败或出口改变，短信仍会保留，下次从第一段重试，因此已收到的前几段可能重复。
-服务只转发入站短信，发件箱记录和短信状态报告会保留不动。
-
-## 检查和卸载
+## 运维
 
 ```sh
 logread -e sms2telegram
 /etc/init.d/sms2telegram status
+/etc/init.d/sms2telegram restart
+/etc/init.d/sms2telegram enable
+/etc/init.d/sms2telegram stop
 opkg remove sms2telegram
 ```
 
-日志只用于记录服务状态和错误类别。请在收集 `logread` 输出或截图前确认其
-中没有 Token、Chat ID 和短信正文；不要主动打印这些敏感信息。
+服务会自动处理半条/多条 JSON、空行、非法 JSON、USB 断开和重新枚举。Telegram 失败会
+保留内存队列并退避重试；日志不会输出 Telegram 凭据，也不会重复打印短信正文。
 
-如果服务未运行，先确认 `/dev/ttyACM0` 存在、配置中的出口仍为 `eth0`，再查看
-上面的日志。卸载会停止并禁用服务；UCI 配置作为用户配置保留，便于重新安装。
+实机至少验证英文、中文、验证码、长短信、USB 拔插、模组重启和非法 JSON 七个场景。
+待发送队列与最近 200 条去重记录只在内存中，NanoPi 进程重启会丢失尚未转发的事件。

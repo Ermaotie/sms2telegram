@@ -43,6 +43,10 @@ t.eq("invalid bot token cannot form offset path", status.offset_path and status.
 local healthy_report = status.format_report and status.format_report({
   version = "1.2.0",
   uptime_seconds = 3661,
+  sms_connected = true,
+  sms_ready = true,
+  sms_device = "/dev/ttyACM2",
+  sms_device_available = true,
   modem_connected = true,
   device = "/dev/ttyACM0",
   device_available = true,
@@ -50,9 +54,6 @@ local healthy_report = status.format_report and status.format_report({
   allowed_device = "eth0",
   signal_rssi = 22,
   registration_status = 5,
-  sms_used = 0,
-  sms_total = 10,
-  retain_count = 3,
   last_scan = "正常",
   last_scan_at = "2026-09-06 23:10:00",
   bot_token = "must-not-leak",
@@ -61,18 +62,22 @@ local healthy_report = status.format_report and status.format_report({
 t.truthy("healthy report starts green", healthy_report and healthy_report:match("^🟢"))
 t.truthy("healthy report includes version", healthy_report and healthy_report:find("版本：1.2.0", 1, true))
 t.truthy("healthy report includes service uptime", healthy_report and healthy_report:find("运行时长：1小时 1分钟", 1, true))
-t.truthy("healthy report includes modem state", healthy_report and healthy_report:find("短信模块：已连接", 1, true))
+t.truthy("healthy report includes VUART state", healthy_report and healthy_report:find("短信 VUART：已连接，模组已就绪", 1, true))
+t.truthy("healthy report includes VUART device", healthy_report and healthy_report:find("VUART 设备：/dev/ttyACM2（可用）", 1, true))
+t.truthy("healthy report includes AT diagnostics", healthy_report and healthy_report:find("AT 诊断口：已连接", 1, true))
 t.truthy("healthy report includes allowed route", healthy_report and healthy_report:find("网络出口：eth0（允许）", 1, true))
 t.truthy("healthy report names configured allowed route", healthy_report and healthy_report:find("允许出口：eth0", 1, true))
 t.truthy("healthy report includes signal", healthy_report and healthy_report:find("信号：很强（22/31，约 -69 dBm）", 1, true))
 t.truthy("healthy report includes registration", healthy_report and healthy_report:find("蜂窝注册：已注册（漫游）", 1, true))
-t.truthy("healthy report includes SMS storage", healthy_report and healthy_report:find("短信存储：0/10（保留上限 3）", 1, true))
-t.truthy("healthy report includes last scan", healthy_report and healthy_report:find("最近扫描：正常（2026-09-06 23:10:00）", 1, true))
+t.truthy("healthy report includes last event", healthy_report and healthy_report:find("最近事件：正常（2026-09-06 23:10:00）", 1, true))
 t.eq("healthy report excludes token", healthy_report and healthy_report:find("must-not-leak", 1, true), nil)
 
 local unhealthy_report = status.format_report and status.format_report({
   version = "1.2.0",
   uptime_seconds = 5,
+  sms_connected = false,
+  sms_device = "/dev/ttyACM2",
+  sms_device_available = false,
   modem_connected = false,
   device = "/dev/ttyACM0",
   device_available = false,
@@ -82,21 +87,21 @@ local unhealthy_report = status.format_report and status.format_report({
   last_scan_at = "2026-09-06 23:11:00"
 })
 t.truthy("unhealthy report starts warning", unhealthy_report and unhealthy_report:match("^🟠"))
-t.truthy("unhealthy report shows disconnected modem", unhealthy_report and unhealthy_report:find("短信模块：未连接", 1, true))
+t.truthy("unhealthy report shows disconnected VUART", unhealthy_report and unhealthy_report:find("短信 VUART：未连接", 1, true))
 t.truthy("unhealthy report shows blocked SIM route", unhealthy_report and unhealthy_report:find("网络出口：eth2（已阻止）", 1, true))
 t.truthy("unhealthy report shows unknown signal", unhealthy_report and unhealthy_report:find("信号：未知", 1, true))
 
 local partial_report = status.format_report({
+  sms_connected = true, sms_ready = true,
+  sms_device = "/dev/ttyACM2", sms_device_available = true,
   modem_connected = true, device_available = true,
   route_device = "eth0", allowed_device = "eth0",
   signal_rssi = 22, registration_status = 5,
-  last_scan = "已保留 1 条无法解析短信，其他短信正常处理", last_scan_ok = false,
-  anomaly_report = "已汇报 1 条异常记录（已去重）"
+  last_scan = "收到非法 VUART 数据", last_scan_ok = false
 })
-t.truthy("partial decode shows warning", partial_report:match("^🟠"))
-t.truthy("partial decode does not claim modem disconnected", partial_report:find("短信模块：已连接", 1, true))
-t.truthy("partial decode explains retained record", partial_report:find("已保留 1 条无法解析短信", 1, true))
-t.truthy("status reports anomaly notification state", partial_report:find("异常汇报：已汇报 1 条异常记录（已去重）", 1, true))
+t.truthy("invalid VUART data shows warning", partial_report:match("^🟠"))
+t.truthy("warning keeps VUART connected", partial_report:find("短信 VUART：已连接", 1, true))
+t.truthy("warning explains invalid event", partial_report:find("收到非法 VUART 数据", 1, true))
 
 local offset_path = "/tmp/sms2telegram-status-offset-" .. process_id()
 os.remove(offset_path)
@@ -166,7 +171,8 @@ local bot_ok, bot_err = bot and bot:poll({
   chat_id = "-1001234567890",
   allowed_wan_device = "eth0"
 }, {
-  version = "1.2.0", uptime_seconds = 10, modem_connected = true,
+  version = "1.2.0", uptime_seconds = 10, sms_connected = true, sms_ready = true,
+  sms_device = "/dev/ttyACM2", sms_device_available = true, modem_connected = true,
   device = "/dev/ttyACM0", device_available = true,
   route_device = "eth0", allowed_device = "eth0", last_scan = "正常"
 })
@@ -222,7 +228,8 @@ local failing_ok, failing_err = failing_bot:poll({
   bot_token = "123456:Abc_def-XYZ", chat_id = "-1001234567890",
   allowed_wan_device = "eth0"
 }, {
-  version = "1.2.0", uptime_seconds = 10, modem_connected = true,
+  version = "1.2.0", uptime_seconds = 10, sms_connected = true, sms_ready = true,
+  sms_device = "/dev/ttyACM2", sms_device_available = true, modem_connected = true,
   device = "/dev/ttyACM0", device_available = true,
   route_device = "eth0", allowed_device = "eth0", last_scan = "正常"
 })

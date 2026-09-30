@@ -1,19 +1,25 @@
 #!/usr/bin/lua
 
 local nixio = require "nixio"
+local json = require "luci.jsonc"
 local libdir = os.getenv("SMS2TELEGRAM_LIBDIR") or "/usr/lib/sms2telegram"
 local core = dofile(libdir .. "/core.lua")
+local serial = dofile(libdir .. "/serial.lua")
 local at = dofile(libdir .. "/at.lua")
+local vuart = dofile(libdir .. "/vuart.lua")
 local delivery = dofile(libdir .. "/delivery.lua")
 local status_module = dofile(libdir .. "/status.lua")
 local worker_module = dofile(libdir .. "/worker.lua")
-local ledger_path = os.getenv("SMS2TELEGRAM_LEDGER_PATH") or "/etc/sms2telegram/delivered"
 local update_offset_path = os.getenv("SMS2TELEGRAM_UPDATE_OFFSET_PATH") or
   "/etc/sms2telegram/telegram_update_offset"
-local service_version = "1.3.0"
+local service_version = "2.0.0"
 local started_at = os.time()
 
 pcall(nixio.openlog, "sms2telegram")
+
+local function log(level, component, message)
+  nixio.syslog(level, "[" .. component .. "] " .. message)
+end
 
 local function trim(value)
   if type(value) ~= "string" then return "" end
@@ -28,41 +34,28 @@ local function uci_value(key)
   return trim(value)
 end
 
-local function integer_between(value, minimum, maximum)
+local function interval(value)
   local number = tonumber(value)
-  if not number or number % 1 ~= 0 or number < minimum or number > maximum then return nil end
+  if not number or number % 1 ~= 0 or number < 1 or number > 3600 then return nil end
   return number
 end
 
-local function interval(value)
-  return integer_between(value, 1, 3600)
-end
-
 local function load_config()
-  local retain_count = uci_value("retain_count")
-  if retain_count == "" then retain_count = "3" end
   local config = {
     device = uci_value("device"),
-    storage = uci_value("storage"),
+    sms_device = uci_value("sms_device"),
     bot_token = uci_value("bot_token"),
     chat_id = uci_value("chat_id"),
     allowed_wan_device = uci_value("allowed_wan_device"),
     poll_interval = interval(uci_value("poll_interval")),
     retry_initial = interval(uci_value("retry_initial")),
     retry_max = interval(uci_value("retry_max")),
-    retain_count = integer_between(retain_count, 0, 100),
     telegram_limit = 4096
   }
-  if not config.poll_interval or not config.retry_initial or not config.retry_max or
-      not config.retain_count or
-      config.retry_initial > config.retry_max then
-    return nil
-  end
+  if config.sms_device == "" or config.sms_device == config.device or
+      not config.poll_interval or not config.retry_initial or not config.retry_max or
+      config.retry_initial > config.retry_max then return nil end
   return config
-end
-
-local function log_redacted(category, delay)
-  nixio.syslog("err", "sms2telegram " .. tostring(category) .. " retry=" .. tostring(delay))
 end
 
 local function route_output()
@@ -71,244 +64,189 @@ local function route_output()
   return output or ""
 end
 
-local function close_client(client)
-  if client and client.transport and client.transport.close then client.transport:close() end
+local function close_transport(transport)
+  if transport and transport.close then transport:close() end
 end
 
-local client
-local connected_device
-local connected_storage
-local last_scan = "等待首次扫描"
-local last_scan_at
-local last_scan_ok
-local status_bot
-local status_bot_id
-local status_error_logged = false
-local signal_rssi
-local signal_ber
-local registration_status
-local sms_used
-local sms_total
-local rejected_count = 0
-local report_delay
-local report_after = 0
-local report_state = "等待扫描"
-
-local function mark_scan(message, ok)
-  last_scan = message
-  last_scan_ok = ok
-  last_scan_at = os.date("%Y-%m-%d %H:%M:%S")
+local function decode_json(line)
+  return json.parse(line)
 end
 
-local function clear_modem_diagnostics()
-  signal_rssi = nil
-  signal_ber = nil
-  registration_status = nil
-  sms_used = nil
-  sms_total = nil
-end
-
-local function refresh_modem_diagnostics()
-  if not client then
-    clear_modem_diagnostics()
-    return
-  end
-  if type(client.signal_quality) == "function" then
-    signal_rssi, signal_ber = client:signal_quality()
-  else
-    signal_rssi, signal_ber = nil, nil
-  end
-  if type(client.registration_status) == "function" then
-    registration_status = client:registration_status()
-  else
-    registration_status = nil
-  end
-  if type(client.storage_status) == "function" then
-    sms_used, sms_total = client:storage_status()
-  else
-    sms_used, sms_total = nil, nil
-  end
-end
-
+local status_bot, status_bot_id
 local function ensure_status_bot(config)
   if os.getenv("SMS2TELEGRAM_STATUS_DISABLED") == "1" then return nil end
-  local bot_offset_path, bot_id = status_module.offset_path(update_offset_path, config.bot_token)
-  if not bot_offset_path then return nil end
+  local offset, bot_id = status_module.offset_path(update_offset_path, config.bot_token)
+  if not offset then return nil end
   if status_bot and status_bot_id == bot_id then return status_bot end
-  local offset_store = status_module.OffsetStore.new(bot_offset_path)
-  if not offset_store then return nil end
+  local store = status_module.OffsetStore.new(offset)
+  if not store then return nil end
   status_bot = status_module.Bot.new({
     delivery = delivery,
     core = core,
     route = route_output,
     exec = delivery._run,
     sender = delivery.Sender.new({}, { pid = nixio.getpid() }),
-    offset_store = offset_store
+    offset_store = store
   }, { pid = nixio.getpid() })
   status_bot_id = status_bot and bot_id or nil
   return status_bot
 end
 
+local receiver, at_client
+local signal_rssi, signal_ber, registration_status
+local vuart_ready = false
+local last_event = "等待 Air780EPV 事件"
+local last_event_at, last_event_ok
+
+local function mark_event(message, ok)
+  last_event, last_event_ok = message, ok
+  last_event_at = os.date("%Y-%m-%d %H:%M:%S")
+end
+
 local function poll_status(config)
   local bot = ensure_status_bot(config)
   if not bot then return end
-  local current_route = route_output()
-  local route_device = core.route_device(current_route)
-  local device_available = nixio.fs and nixio.fs.stat and nixio.fs.stat(config.device) ~= nil
-  local ok = bot:poll(config, {
+  local route_device = core.route_device(route_output())
+  bot:poll(config, {
     version = service_version,
     uptime_seconds = os.time() - started_at,
-    modem_connected = client ~= nil,
+    sms_connected = receiver ~= nil,
+    sms_ready = vuart_ready,
+    sms_device = config.sms_device,
+    sms_device_available = nixio.fs.stat(config.sms_device) ~= nil,
+    modem_connected = at_client ~= nil,
     device = config.device,
-    device_available = device_available,
+    device_available = config.device ~= "" and nixio.fs.stat(config.device) ~= nil,
     route_device = route_device,
     allowed_device = config.allowed_wan_device,
     signal_rssi = signal_rssi,
     signal_ber = signal_ber,
     registration_status = registration_status,
-    sms_used = sms_used,
-    sms_total = sms_total,
-    retain_count = config.retain_count,
-    last_scan = last_scan,
-    anomaly_report = report_state,
-    last_scan_at = last_scan_at,
-    last_scan_ok = last_scan_ok
+    last_scan = last_event,
+    last_scan_at = last_event_at,
+    last_scan_ok = last_event_ok
   })
-  if ok then
-    status_error_logged = false
-  elseif not status_error_logged then
-    nixio.syslog("err", "sms2telegram status command unavailable")
-    status_error_logged = true
+end
+
+local function refresh_at(config)
+  if config.device == "" then return end
+  if not at_client then
+    local transport = serial.open(config.device, 115200, { drain = true })
+    if not transport then return end
+    local client = at.Client.new(transport)
+    if not client:initialize() then close_transport(transport); return end
+    at_client = client
+  end
+  local rssi, ber = at_client:signal_quality()
+  local registered = at_client:registration_status()
+  if not rssi or registered == nil then
+    close_transport(at_client.transport)
+    at_client, signal_rssi, signal_ber, registration_status = nil, nil, nil, nil
+    return
+  end
+  signal_rssi, signal_ber, registration_status = rssi, ber, registered
+end
+
+local function run(config)
+  local worker = worker_module.new({
+    core = core,
+    delivery = delivery,
+    sender = delivery.Sender.new({}, { pid = nixio.getpid() }),
+    route = route_output
+  }, config)
+  -- ponytail: retry queue is in memory; add a tiny spool file only if crash-safe delivery is required.
+  local reconnect_delay, reconnect_after = nil, 0
+  local send_delay, send_after = nil, 0
+  local status_after, diagnostics_after = 0, 0
+
+  while true do
+    local now = os.time()
+    if now >= status_after then
+      poll_status(config)
+      status_after = now + config.poll_interval
+    end
+    if now >= diagnostics_after then
+      refresh_at(config)
+      diagnostics_after = now + 60
+    end
+
+    if not receiver and now >= reconnect_after then
+      local transport = serial.open(config.sms_device, 115200)
+      if transport then
+        receiver = transport
+        reconnect_delay, reconnect_after = nil, 0
+        vuart_ready = false
+        log("info", "sms-uart", "connected: " .. config.sms_device)
+      else
+        reconnect_delay = core.next_backoff(
+          reconnect_delay, config.retry_initial, config.retry_max)
+        reconnect_after = now + reconnect_delay
+        log("warning", "sms-uart", "reconnecting in " .. reconnect_delay .. "s")
+      end
+    end
+
+    if receiver then
+      local line, read_err = receiver:next_line(1000)
+      if read_err then
+        log("warning", "sms-uart", "disconnected: " .. tostring(read_err))
+        close_transport(receiver)
+        receiver, vuart_ready = nil, false
+        reconnect_delay = core.next_backoff(
+          reconnect_delay, config.retry_initial, config.retry_max)
+        reconnect_after = os.time() + reconnect_delay
+        mark_event("串口断开，等待重连", false)
+      elseif line then
+        local message, parse_err = vuart.decode_line(line, decode_json)
+        if message == false then
+          -- Empty line: valid framing noise, nothing to do.
+        elseif not message then
+          log("warning", "sms-uart", "invalid message: " .. tostring(parse_err))
+          mark_event("收到非法 VUART 数据", false)
+        elseif message.type == "ready" then
+          vuart_ready = true
+          log("info", "sms-uart", "Air780EPV ready")
+          mark_event("Air780EPV 已就绪", true)
+        else
+          local queued = worker:enqueue(message)
+          if queued then
+            log("info", "sms", "received from " .. message.number)
+            mark_event("收到短信，等待转发", true)
+          else
+            log("info", "sms", "duplicate ignored")
+          end
+        end
+      end
+    else
+      nixio.nanosleep(1)
+    end
+
+    now = os.time()
+    if worker:pending_count() > 0 and now >= send_after then
+      local sent, category, detail, message = worker:process_next()
+      if sent then
+        if message then
+          log("info", "sms", "forwarded to Telegram")
+          mark_event("短信已转发到 Telegram", true)
+        end
+        send_delay, send_after = nil, 0
+      elseif category == "message" then
+        log("warning", "sms", "invalid event dropped: " .. tostring(detail))
+        mark_event("无效短信事件已忽略", false)
+      else
+        send_delay = core.next_backoff(send_delay, config.retry_initial, config.retry_max)
+        send_after = now + send_delay
+        log("err", "sms", tostring(category) .. " retry=" .. send_delay)
+        mark_event("短信转发失败，等待重试", false)
+      end
+    end
   end
 end
 
-local function sleep_with_status(config, seconds)
-  local remaining = seconds
-  while remaining > 0 do
-    local step = math.min(config.poll_interval, remaining)
-    nixio.nanosleep(step)
-    remaining = remaining - step
-    poll_status(config)
-  end
-end
-
-local delay
 while true do
   local config = load_config()
-  if not config or not delivery.validate_credentials(config.bot_token, config.chat_id) then
-    close_client(client)
-    client = nil
-    connected_device = nil
-    connected_storage = nil
-    clear_modem_diagnostics()
-    nixio.nanosleep((config and config.poll_interval) or 1)
-  else
-    poll_status(config)
-    if client and (connected_device ~= config.device or connected_storage ~= config.storage) then
-      close_client(client)
-      client = nil
-      connected_device = nil
-      connected_storage = nil
-      clear_modem_diagnostics()
-    end
-    if not client then
-      local transport = at.open_nixio_transport(config.device, 115200)
-      if transport then
-        client = at.Client.new(transport, core, { storage = config.storage })
-        local initialized = client:initialize()
-        if not initialized then
-          close_client(client)
-          client = nil
-        else
-          connected_device = config.device
-          connected_storage = config.storage
-          refresh_modem_diagnostics()
-        end
-      end
-      if not client then
-        mark_scan("串口连接失败", false)
-        delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
-        log_redacted("at", delay)
-        sleep_with_status(config, delay)
-      end
-    end
-
-    if client then
-      local ledger = delivery.Ledger.new(ledger_path)
-      if not ledger then
-        mark_scan("确认记录异常", false)
-        delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
-        log_redacted("ledger", delay)
-        sleep_with_status(config, delay)
-      else
-        local instance = worker_module.new({
-          core = core,
-          delivery = delivery,
-          at_client = client,
-          sender = delivery.Sender.new({}, { pid = nixio.getpid() }),
-          ledger = ledger,
-          route = route_output
-        }, config)
-        local ok, category, at_failed, rejected = instance:cycle()
-        if ok then
-          refresh_modem_diagnostics()
-          local count = #(rejected or {})
-          if count ~= rejected_count then
-            nixio.syslog(count > 0 and "warning" or "info",
-              "sms2telegram undecodable SMS retained count=" .. tostring(count))
-            rejected_count = count
-          end
-          if count > 0 then
-            if os.time() >= report_after then
-              local reports = delivery.Ledger.new(ledger_path .. ".alerts")
-              local reported, report_error = instance:report_rejected(rejected, reports)
-              if reported then
-                report_delay, report_after = nil, 0
-                report_state = "已汇报 " .. count .. " 条异常记录（已去重）"
-              else
-                report_delay = core.next_backoff(report_delay, config.retry_initial, config.retry_max)
-                report_after = os.time() + report_delay
-                report_state = "汇报失败，等待重试；原短信已保留"
-                log_redacted("alert_" .. (report_error or "unknown"), report_delay)
-              end
-            end
-            mark_scan("已保留 " .. count .. " 条无法解析短信，其他短信正常处理", false)
-          else
-            report_delay, report_after = nil, 0
-            report_state = "无异常短信"
-            mark_scan("正常", true)
-          end
-          delay = nil
-          local waited, wait_err = client:wait_for_cmti(config.poll_interval * 1000)
-          if waited == nil then
-            mark_scan("串口通信异常", false)
-            close_client(client)
-            client = nil
-            connected_device = nil
-            connected_storage = nil
-            clear_modem_diagnostics()
-            delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
-            log_redacted("at", delay)
-            sleep_with_status(config, delay)
-          end
-        else
-          local scan_labels = {
-            at = "串口通信异常", ledger = "确认记录异常",
-            route = "网络出口异常", telegram = "Telegram 发送异常"
-          }
-          mark_scan(scan_labels[category] or "未知异常", false)
-          if category == "at" or at_failed then
-            close_client(client)
-            client = nil
-            connected_device = nil
-            connected_storage = nil
-            clear_modem_diagnostics()
-          end
-          delay = core.next_backoff(delay, config.retry_initial, config.retry_max)
-          log_redacted(category, delay)
-          sleep_with_status(config, delay)
-        end
-      end
-    end
+  if config and delivery.validate_credentials(config.bot_token, config.chat_id) then
+    run(config)
   end
+  log("err", "sms2telegram", "invalid configuration")
+  nixio.nanosleep(1)
 end
